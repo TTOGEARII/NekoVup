@@ -1,0 +1,44 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <RootNamespace>NekoVup.App</RootNamespace>
+    <AssemblyName>NekoVup</AssemblyName>
+    <!-- 릴리스 태그(vX.Y.Z)와 맞춘다. 배포 워크플로는 태그에서 읽은 값으로 덮어쓴다. -->
+    <Version>1.0.0</Version>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>app.ico</ApplicationIcon>
+    <Platforms>x64</Platforms>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <UseWinUI>true</UseWinUI>
+    <!-- 설치 패키지(MSIX) 없이 실행 파일로 배포하고, Windows App SDK 런타임도 함께 넣는다. -->
+    <WindowsPackageType>None</WindowsPackageType>
+    <EnableMsixTooling>true</EnableMsixTooling>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <SelfContained>true</SelfContained>
+    <PublishAot>true</PublishAot>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- 시작점을 직접 쓴다(Program.cs): 설치·업데이트 훅을 창보다 먼저 돌려야 한다. -->
+    <DefineConstants>$(DefineConstants);DISABLE_XAML_GENERATED_MAIN</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\NekoVup.Core\NekoVup.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.6.5" />
+    <!-- 배포 워크플로의 vpk 도구와 같은 버전이어야 한다. 어긋나면 설치 파일이 멈춘다. -->
+    <PackageReference Include="Velopack" Version="1.2.161" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 창 아이콘과, 업데이트를 적용하는 동안 보여 주는 안내 그림 -->
+    <Content Include="app.ico" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\assets\splash-setup.png" Link="assets\splash.png" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,45 @@
+name: Build
+
+# main 푸시·PR마다 빌드와 테스트가 깨지지 않는지, 설치 파일까지 만들어지는지 확인한다.
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - run: dotnet build NekoVup.sln -c Release
+
+      # ffmpeg나 python(numpy·Pillow)이 없으면 실제 도구가 필요한 테스트는 건너뛴다.
+      - run: dotnet test --project tests/NekoVup.Tests -c Release --no-build
+
+  package:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Install Velopack CLI
+        # 프로젝트의 Velopack 패키지와 같은 버전으로 고정한다. 어긋나면 설치 파일이 멈춘다.
+        run: dotnet tool install -g vpk --version 1.2.161
+
+      - name: Publish and pack installer
+        shell: pwsh
+        run: ./tools/pack.ps1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NekoVup-Setup
+          path: Releases/NekoVup-win-Setup.exe
+          retention-days: 7

@@ -1,0 +1,531 @@
+<Window
+    x:Class="NekoVup.App.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:NekoVup.App.Controls"
+    xmlns:vm="using:NekoVup.App.ViewModels"
+    Title="NekoVup">
+
+    <Grid x:Name="Root" AllowDrop="True" DragOver="OnDragOver" Drop="OnDrop" Background="{ThemeResource NekoBg}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <!-- 창 전체에 깔리는 은은한 망점 (원고 질감) -->
+        <controls:MangaTexture Kind="Dots" Grid.RowSpan="6" />
+
+        <!-- ═══ 제목 줄 ═══ -->
+        <Grid x:Name="TitleBarArea" Height="40" Padding="14,0,150,0" ColumnSpacing="8" Background="Transparent">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+            <controls:NekoLogo Width="22" Height="22" VerticalAlignment="Center" />
+            <TextBlock Grid.Column="1" Text="NekoVup" FontSize="13" VerticalAlignment="Center" Foreground="{ThemeResource NekoText}" />
+            <TextBlock Grid.Column="2" Text="{x:Bind ViewModel.VersionText}" FontSize="12" VerticalAlignment="Center"
+                       Foreground="{ThemeResource NekoHint}" />
+        </Grid>
+
+        <!-- ═══ 알림 줄 ═══ -->
+        <InfoBar x:Name="MessageBar" Grid.Row="1" Margin="16,0,16,0" IsClosable="True"
+                 BorderBrush="{ThemeResource NekoStroke}" BorderThickness="2"
+                 IsOpen="{x:Bind ViewModel.HasMessage, Mode=TwoWay}"
+                 Message="{x:Bind ViewModel.Message, Mode=OneWay}" />
+
+        <!-- ═══ 기능 카드 2장 + 실행 버튼 ═══ -->
+        <Grid Grid.Row="2" Margin="16,8,16,4" ColumnSpacing="8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+
+            <Border Style="{StaticResource NekoFeatureCard}">
+                <Grid ColumnSpacing="8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel VerticalAlignment="Center">
+                        <TextBlock Style="{StaticResource CardTitle}" Text="🧽 워터마크 제거" />
+                        <TextBlock Style="{StaticResource HintText}" Margin="0,4,0,0" Text="{x:Bind ViewModel.RemoveHint, Mode=OneWay}" />
+                    </StackPanel>
+                    <ToggleSwitch Grid.Column="1" VerticalAlignment="Center" MinWidth="0" OnContent="" OffContent=""
+                                  AutomationProperties.Name="워터마크 제거"
+                                  IsOn="{x:Bind ViewModel.RemoveOn, Mode=TwoWay}"
+                                  IsEnabled="{x:Bind ViewModel.NotRunning, Mode=OneWay}" />
+                </Grid>
+            </Border>
+
+            <Border Grid.Column="1" Style="{StaticResource NekoFeatureCard}">
+                <Grid ColumnSpacing="8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel VerticalAlignment="Center">
+                        <TextBlock Style="{StaticResource CardTitle}" Text="🔍 업스케일" />
+                        <TextBlock Style="{StaticResource HintText}" Margin="0,4,0,0" Text="{x:Bind ViewModel.UpscaleHint, Mode=OneWay}" />
+                    </StackPanel>
+                    <ToggleSwitch Grid.Column="1" VerticalAlignment="Center" MinWidth="0" OnContent="" OffContent=""
+                                  AutomationProperties.Name="업스케일"
+                                  IsOn="{x:Bind ViewModel.UpscaleOn, Mode=TwoWay}"
+                                  IsEnabled="{x:Bind ViewModel.NotRunning, Mode=OneWay}" />
+                </Grid>
+            </Border>
+
+            <StackPanel Grid.Column="2" VerticalAlignment="Center" Spacing="6">
+                <Button Content="✦ 시작! (ﾉ´ヮ`)ﾉ*:･ﾟ✧" AutomationProperties.Name="시작" Click="OnStartClick"
+                        Style="{ThemeResource AccentButtonStyle}" FontWeight="Bold" FontSize="15" Padding="22,12"
+                        HorizontalAlignment="Stretch" IsEnabled="{x:Bind ViewModel.CanStart, Mode=OneWay}" />
+                <Button Content="멈추기" Click="OnCancelClick" Padding="22,6" HorizontalAlignment="Stretch"
+                        IsEnabled="{x:Bind ViewModel.IsRunning, Mode=OneWay}" />
+            </StackPanel>
+        </Grid>
+
+        <!-- ═══ 가운데: 끌어다 놓는 자리 / 작업대 ═══ -->
+        <Grid Grid.Row="3" Margin="16,8">
+
+            <!-- 영상이 없을 때 -->
+            <Border Style="{StaticResource InkPanel}" Visibility="{x:Bind ViewModel.NoVideo, Mode=OneWay}">
+                <Grid>
+                    <controls:MangaTexture Kind="Dots" />
+                    <controls:MangaTexture Kind="Grid" />
+                    <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
+                        <controls:NekoLogo Width="104" Height="104" HorizontalAlignment="Center" />
+                        <TextBlock Text="영상 파일을 여기에 끌어다 놓으세요" FontSize="16" FontWeight="SemiBold" Margin="0,16,0,0"
+                                   HorizontalAlignment="Center" Foreground="{ThemeResource NekoText}" />
+                        <TextBlock Text="mp4 · mkv · mov · avi · webm 지원" Style="{StaticResource HintText}" Margin="0,6,0,0" HorizontalAlignment="Center" />
+                        <Button Content="파일 고르기" Click="OnOpenClick" Margin="0,16,0,0" Padding="18,8" HorizontalAlignment="Center" />
+                    </StackPanel>
+                </Grid>
+            </Border>
+
+            <!-- 영상을 열었을 때: 왼쪽 미리보기 작업대, 오른쪽 옵션 -->
+            <Grid ColumnSpacing="12" Visibility="{x:Bind ViewModel.HasVideo, Mode=OneWay}">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="400" />
+                </Grid.ColumnDefinitions>
+
+                <Border BorderBrush="{ThemeResource NekoStroke}" BorderThickness="2" Background="{ThemeResource NekoCanvas}">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+
+                        <!-- 위쪽 라벨 바 (원고에 붙인 이름표) -->
+                        <Border Background="{ThemeResource NekoStroke}" Padding="8,4">
+                            <Grid ColumnSpacing="12">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="{x:Bind ViewModel.FileName, Mode=OneWay}" Foreground="{ThemeResource NekoBg}"
+                                           FontWeight="Bold" FontSize="12" TextTrimming="CharacterEllipsis" MaxWidth="420" />
+                                <TextBlock Grid.Column="1" Text="{x:Bind ViewModel.InfoText, Mode=OneWay}" Foreground="{ThemeResource NekoBg}"
+                                           FontSize="11.5" Opacity="0.85" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+                            </Grid>
+                        </Border>
+
+                        <Grid Grid.Row="1">
+                            <controls:BoxEditor x:Name="Editor" />
+                            <ProgressRing x:Name="PreviewBusy" IsActive="False" Width="28" Height="28"
+                                          HorizontalAlignment="Right" VerticalAlignment="Top" Margin="10" />
+                        </Grid>
+
+                        <Border Grid.Row="2" Background="{ThemeResource NekoCard}" BorderBrush="{ThemeResource NekoStroke}"
+                                BorderThickness="0,2,0,0" Padding="12,4">
+                            <Grid ColumnSpacing="12">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <Slider x:Name="Timeline" Minimum="0" StepFrequency="0.1" IsThumbToolTipEnabled="False"
+                                        Maximum="{x:Bind ViewModel.DurationSeconds, Mode=OneWay}"
+                                        Value="{x:Bind ViewModel.PreviewSeconds, Mode=TwoWay}"
+                                        ValueChanged="OnTimelineChanged" />
+                                <TextBlock Grid.Column="1" VerticalAlignment="Center" FontSize="12" Foreground="{ThemeResource NekoText}"
+                                           Text="{x:Bind ViewModel.PreviewTimeText, Mode=OneWay}" />
+                                <ToggleSwitch Grid.Column="2" OnContent="결과 보기" OffContent="원본 보기" MinWidth="0"
+                                              Visibility="{x:Bind ViewModel.HasResult, Mode=OneWay}"
+                                              IsOn="{x:Bind ViewModel.PreviewResult, Mode=TwoWay}" Toggled="OnPreviewSourceToggled" />
+                            </Grid>
+                        </Border>
+                    </Grid>
+                </Border>
+
+                <!-- 옵션 -->
+                <Border Grid.Column="1" Style="{StaticResource InkPanel}">
+                    <ScrollViewer VerticalScrollBarVisibility="Auto">
+                        <StackPanel Padding="14,0,14,14" IsHitTestVisible="{x:Bind ViewModel.NotRunning, Mode=OneWay}">
+
+                            <!-- 제거 방식 -->
+                            <StackPanel Visibility="{x:Bind ViewModel.NeedsBoxes, Mode=OneWay}">
+                                <Border Style="{StaticResource MangaTag}">
+                                    <TextBlock Style="{StaticResource MangaTagText}" Text="제거 방식" />
+                                </Border>
+                                <RadioButtons SelectedIndex="{x:Bind ViewModel.RemoveMethodIndex, Mode=TwoWay}">
+                                    <RadioButton Content="ProPainter — 자연스럽게 복원 (느림, GPU)" />
+                                    <RadioButton Content="delogo — 빠르지만 뭉갠 자국이 남음" />
+                                </RadioButtons>
+                            </StackPanel>
+
+                            <!-- 박스 -->
+                            <StackPanel Spacing="6" Visibility="{x:Bind ViewModel.NeedsBoxes, Mode=OneWay}">
+                                <Grid>
+                                    <Border Style="{StaticResource MangaTag}" VerticalAlignment="Bottom">
+                                        <TextBlock Style="{StaticResource MangaTagText}" Text="워터마크 위치" />
+                                    </Border>
+                                    <Button Content="+ 박스 추가" HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,0,4" Click="OnAddBoxClick"
+                                            IsEnabled="{x:Bind ViewModel.HasVideo, Mode=OneWay}" />
+                                </Grid>
+                                <TextBlock Style="{StaticResource HintText}"
+                                           Text="미리보기 위에서 끌어서 그려요. 박스 안을 끌면 이동, 손잡이로 크기 조절, Delete로 삭제. 워터마크가 영상 내내 같은 자리에 있어야 해요." />
+                                <Grid ColumnSpacing="6" Margin="0,2,0,0">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="36" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="X" Style="{StaticResource HintText}" />
+                                    <TextBlock Grid.Column="1" Text="Y" Style="{StaticResource HintText}" />
+                                    <TextBlock Grid.Column="2" Text="너비" Style="{StaticResource HintText}" />
+                                    <TextBlock Grid.Column="3" Text="높이" Style="{StaticResource HintText}" />
+                                </Grid>
+                                <ItemsRepeater ItemsSource="{x:Bind ViewModel.Boxes}">
+                                    <ItemsRepeater.Layout>
+                                        <StackLayout Spacing="6" />
+                                    </ItemsRepeater.Layout>
+                                    <ItemsRepeater.ItemTemplate>
+                                        <DataTemplate x:DataType="vm:BoxViewModel">
+                                            <Grid ColumnSpacing="6">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="36" />
+                                                </Grid.ColumnDefinitions>
+                                                <NumberBox Value="{x:Bind X, Mode=TwoWay}" Minimum="0" SmallChange="1" />
+                                                <NumberBox Grid.Column="1" Value="{x:Bind Y, Mode=TwoWay}" Minimum="0" SmallChange="1" />
+                                                <NumberBox Grid.Column="2" Value="{x:Bind Width, Mode=TwoWay}" Minimum="1" SmallChange="1" />
+                                                <NumberBox Grid.Column="3" Value="{x:Bind Height, Mode=TwoWay}" Minimum="1" SmallChange="1" />
+                                                <Button Grid.Column="4" Padding="6" Click="OnRemoveBoxClick" ToolTipService.ToolTip="이 박스 삭제">
+                                                    <FontIcon Glyph="&#xE74D;" FontSize="14" />
+                                                </Button>
+                                            </Grid>
+                                        </DataTemplate>
+                                    </ItemsRepeater.ItemTemplate>
+                                </ItemsRepeater>
+                                <TextBlock Text="{x:Bind ViewModel.RegionText, Mode=OneWay}" Style="{StaticResource HintText}" />
+                                <Border Background="{ThemeResource NekoWarnBg}" Padding="8,5"
+                                        Visibility="{x:Bind ViewModel.HasRegionWarning, Mode=OneWay}">
+                                    <TextBlock Text="{x:Bind ViewModel.RegionWarning, Mode=OneWay}" FontSize="11.5" TextWrapping="Wrap"
+                                               Foreground="{ThemeResource NekoWarnText}" />
+                                </Border>
+                            </StackPanel>
+
+                            <!-- 업스케일 -->
+                            <StackPanel Spacing="6" Visibility="{x:Bind ViewModel.UpscaleEnabled, Mode=OneWay}">
+                                <Border Style="{StaticResource MangaTag}" Margin="0,14,0,0">
+                                    <TextBlock Style="{StaticResource MangaTagText}" Text="업스케일" />
+                                </Border>
+                                <Grid ColumnSpacing="8">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="100" />
+                                    </Grid.ColumnDefinitions>
+                                    <ComboBox HorizontalAlignment="Stretch" SelectedIndex="{x:Bind ViewModel.UpscalePresetIndex, Mode=TwoWay}">
+                                        <ComboBoxItem Content="애니메이션 — 빠름" />
+                                        <ComboBoxItem Content="애니메이션 — 고품질" />
+                                        <ComboBoxItem Content="실사" />
+                                    </ComboBox>
+                                    <ComboBox Grid.Column="1" HorizontalAlignment="Stretch" SelectedIndex="{x:Bind ViewModel.ScaleIndex, Mode=TwoWay}">
+                                        <ComboBoxItem Content="2배" />
+                                        <ComboBoxItem Content="3배" />
+                                        <ComboBoxItem Content="4배" />
+                                    </ComboBox>
+                                </Grid>
+                                <TextBlock Text="{x:Bind ViewModel.OutputSizeText, Mode=OneWay}" Style="{StaticResource HintText}" />
+                            </StackPanel>
+
+                            <!-- 구간 -->
+                            <Border Style="{StaticResource MangaTag}">
+                                <TextBlock Style="{StaticResource MangaTagText}" Text="구간" />
+                            </Border>
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <CheckBox Content="앞부분만 시험 삼아 처리" IsChecked="{x:Bind ViewModel.TestSection, Mode=TwoWay}" MinWidth="0" />
+                                <NumberBox Width="84" Minimum="1" SmallChange="5" Value="{x:Bind ViewModel.TestSeconds, Mode=TwoWay}"
+                                           IsEnabled="{x:Bind ViewModel.TestSection, Mode=OneWay}" />
+                                <TextBlock Text="초" VerticalAlignment="Center" Foreground="{ThemeResource NekoText}" />
+                            </StackPanel>
+
+                            <!-- 출력 -->
+                            <Border Style="{StaticResource MangaTag}">
+                                <TextBlock Style="{StaticResource MangaTagText}" Text="출력 파일" />
+                            </Border>
+                            <Grid ColumnSpacing="6">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBox Text="{x:Bind ViewModel.OutputPath, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                <Button Grid.Column="1" Content="찾아보기" Click="OnBrowseOutputClick" />
+                            </Grid>
+                            <TextBlock Text="자막을 유지하려면 .mkv로 저장하세요." Style="{StaticResource HintText}" Margin="0,6,0,0" />
+
+                            <!-- 고급 -->
+                            <Expander Header="고급 옵션" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" Margin="0,14,0,0">
+                                <Grid ColumnSpacing="10" RowSpacing="8">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                    </Grid.RowDefinitions>
+                                    <NumberBox Header="박스 둘레 여백 (px)" Minimum="0" Maximum="2000" Value="{x:Bind ViewModel.Pad, Mode=TwoWay}" />
+                                    <NumberBox Grid.Column="1" Header="영역 면적 상한 (px)" Minimum="10000" Value="{x:Bind ViewModel.MaxArea, Mode=TwoWay}" />
+                                    <NumberBox Grid.Row="1" Header="조각 길이 (프레임)" Minimum="20" Maximum="1000" Value="{x:Bind ViewModel.ChunkLength, Mode=TwoWay}" />
+                                    <NumberBox Grid.Row="1" Grid.Column="1" Header="조각 겹침 (프레임)" Minimum="0" Maximum="200" Value="{x:Bind ViewModel.Overlap, Mode=TwoWay}" />
+                                    <NumberBox Grid.Row="2" Header="ProPainter subvideo" Minimum="10" Maximum="500" Value="{x:Bind ViewModel.SubvideoLength, Mode=TwoWay}" />
+                                    <NumberBox Grid.Row="2" Grid.Column="1" Header="화질 CRF (낮을수록 고화질)" Minimum="0" Maximum="40" Value="{x:Bind ViewModel.Crf, Mode=TwoWay}" />
+                                </Grid>
+                            </Expander>
+                        </StackPanel>
+                    </ScrollViewer>
+                </Border>
+            </Grid>
+        </Grid>
+
+        <!-- ═══ 진행 패널 ═══ -->
+        <Border Grid.Row="4" Style="{StaticResource InkPanel}" Margin="16,0,16,8" Padding="12,10"
+                Visibility="{x:Bind ViewModel.HasRun, Mode=OneWay}">
+            <StackPanel Spacing="6">
+                <Grid ColumnSpacing="10">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <Border Background="{ThemeResource NekoStroke}" Padding="8,2">
+                        <TextBlock Text="{x:Bind ViewModel.StageText, Mode=OneWay}" Style="{StaticResource MangaTagText}" />
+                    </Border>
+                    <TextBlock Grid.Column="1" Text="{x:Bind ViewModel.DetailText, Mode=OneWay}" Foreground="{ThemeResource NekoHint}"
+                               TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+                    <TextBlock Grid.Column="2" Text="{x:Bind ViewModel.EtaText, Mode=OneWay}" Foreground="{ThemeResource NekoHint}" VerticalAlignment="Center" />
+                </Grid>
+                <ProgressBar Maximum="100" Value="{x:Bind ViewModel.StageProgress, Mode=OneWay}" />
+                <Grid ColumnSpacing="10">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="44" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Text="전체" FontSize="12" Foreground="{ThemeResource NekoHint}" VerticalAlignment="Center" />
+                    <ProgressBar Grid.Column="1" Maximum="100" Value="{x:Bind ViewModel.TotalProgress, Mode=OneWay}" VerticalAlignment="Center" />
+                    <TextBlock Grid.Column="2" Text="{x:Bind ViewModel.TotalText, Mode=OneWay}" FontSize="12" HorizontalAlignment="Right"
+                               Foreground="{ThemeResource NekoText}" />
+                </Grid>
+                <Expander Header="로그" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
+                    <ListView x:Name="LogList" Height="140" SelectionMode="None" ItemsSource="{x:Bind ViewModel.Log}">
+                        <ListView.ItemContainerStyle>
+                            <Style TargetType="ListViewItem">
+                                <Setter Property="MinHeight" Value="0" />
+                                <Setter Property="Padding" Value="4,1" />
+                            </Style>
+                        </ListView.ItemContainerStyle>
+                        <ListView.ItemTemplate>
+                            <DataTemplate x:DataType="x:String">
+                                <TextBlock Text="{x:Bind}" FontFamily="Consolas" FontSize="12" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+                            </DataTemplate>
+                        </ListView.ItemTemplate>
+                    </ListView>
+                </Expander>
+            </StackPanel>
+        </Border>
+
+        <!-- ═══ 아래 줄 ═══ -->
+        <Border Grid.Row="5" Padding="16,10" BorderThickness="0,1,0,0" BorderBrush="{ThemeResource NekoStroke}">
+            <Grid ColumnSpacing="12">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <Button Content="⚙ 설정" AutomationProperties.Name="설정" Click="OnSettingsClick" Padding="14,6" />
+                    <Button Content="🎬 영상 열기" AutomationProperties.Name="영상 열기" Click="OnOpenClick" Padding="14,6"
+                            IsEnabled="{x:Bind ViewModel.NotRunning, Mode=OneWay}" />
+                    <Button Content="📂 결과 폴더" AutomationProperties.Name="결과 폴더" Click="OnOpenFolderClick" Padding="14,6" />
+                    <Button Content="{x:Bind ViewModel.ThemeButtonText, Mode=OneWay}" AutomationProperties.Name="테마 바꾸기" Click="OnThemeClick" Padding="14,6" />
+                    <Button Content="{x:Bind ViewModel.UpdateButtonText, Mode=OneWay}" AutomationProperties.Name="업데이트" Click="OnUpdateClick" Padding="14,6"
+                            Style="{ThemeResource AccentButtonStyle}"
+                            Visibility="{x:Bind ViewModel.UpdateAvailable, Mode=OneWay}"
+                            IsEnabled="{x:Bind ViewModel.NotUpdating, Mode=OneWay}" />
+                </StackPanel>
+                <TextBlock Grid.Column="1" Text="{x:Bind ViewModel.StatusText, Mode=OneWay}" Foreground="{ThemeResource NekoHint}"
+                           HorizontalAlignment="Right" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+            </Grid>
+        </Border>
+
+        <!-- ═══ 설정 대화 상자 ═══ -->
+        <ContentDialog x:Name="SettingsDialog" PrimaryButtonText="저장" CloseButtonText="닫기" DefaultButton="Primary"
+                       BorderBrush="{ThemeResource NekoStroke}" BorderThickness="2">
+            <ContentDialog.Resources>
+                <!-- 기본 최대 폭(548)으로는 경로 입력 칸이 잘린다 -->
+                <x:Double x:Key="ContentDialogMaxWidth">720</x:Double>
+            </ContentDialog.Resources>
+            <ContentDialog.Title>
+                <StackPanel Orientation="Horizontal" Spacing="10">
+                    <controls:NekoLogo Width="26" Height="26" VerticalAlignment="Center" />
+                    <TextBlock Text="설정" VerticalAlignment="Center" />
+                </StackPanel>
+            </ContentDialog.Title>
+
+            <Grid Width="600" Height="460">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+
+                <!-- 서류철 탭 줄: 선택한 탭이 아래 패널의 윗선을 덮도록 패널보다 위에 그린다 -->
+                <StackPanel Orientation="Horizontal" Margin="10,0,10,0" Canvas.ZIndex="1">
+                    <RadioButton x:Name="TabTools" Style="{StaticResource FolderTab}" GroupName="SettingsTabs" Content="🛠 도구" IsChecked="True" Checked="OnSettingsTabChecked" />
+                    <RadioButton x:Name="TabLook" Style="{StaticResource FolderTab}" GroupName="SettingsTabs" Content="🎨 화면" Checked="OnSettingsTabChecked" />
+                    <RadioButton x:Name="TabAbout" Style="{StaticResource FolderTab}" GroupName="SettingsTabs" Content="ℹ 정보" Checked="OnSettingsTabChecked" />
+                </StackPanel>
+
+                <Border Grid.Row="1" Style="{StaticResource InkPanel}">
+                    <Grid Margin="6">
+
+                        <!-- 도구 -->
+                        <ScrollViewer x:Name="PanelTools" VerticalScrollBarVisibility="Auto">
+                            <StackPanel Spacing="8" Margin="8,0,16,8">
+                                <Border Style="{StaticResource MangaTag}" Margin="0,8,0,0">
+                                    <TextBlock Style="{StaticResource MangaTagText}" Text="도구 위치" />
+                                </Border>
+                                <TextBlock Style="{StaticResource HintText}"
+                                           Text="NekoVup은 아래 도구들을 불러서 써요. 도구는 따로 설치해야 하고 여기에 위치를 적어 주세요. FFmpeg는 PATH에 있으면 이름만 적어도 돼요." />
+                                <TextBox Header="ffmpeg" Text="{x:Bind ViewModel.EditFfmpeg, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                <TextBox Header="ffprobe" Text="{x:Bind ViewModel.EditFfprobe, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                <Grid ColumnSpacing="6">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBox Header="ProPainter용 Python (보통 ProPainter\venv\Scripts\python.exe)"
+                                             Text="{x:Bind ViewModel.EditPython, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                    <Button Grid.Column="1" Content="찾기" VerticalAlignment="Bottom" Click="OnBrowsePythonClick" />
+                                </Grid>
+                                <Grid ColumnSpacing="6">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBox Header="ProPainter 폴더 (inference_propainter.py가 있는 곳)"
+                                             Text="{x:Bind ViewModel.EditProPainterDir, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                    <Button Grid.Column="1" Content="찾기" VerticalAlignment="Bottom" Click="OnBrowseProPainterClick" />
+                                </Grid>
+                                <Grid ColumnSpacing="6">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBox Header="Video2X (video2x.exe)"
+                                             Text="{x:Bind ViewModel.EditVideo2X, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                    <Button Grid.Column="1" Content="찾기" VerticalAlignment="Bottom" Click="OnBrowseVideo2XClick" />
+                                </Grid>
+
+                                <Border Style="{StaticResource MangaTag}">
+                                    <TextBlock Style="{StaticResource MangaTagText}" Text="환경 점검" />
+                                </Border>
+                                <StackPanel Orientation="Horizontal" Spacing="10">
+                                    <Button Content="환경 점검" Click="OnCheckClick" />
+                                    <ProgressRing IsActive="{x:Bind ViewModel.IsChecking, Mode=OneWay}" Width="20" Height="20" />
+                                </StackPanel>
+                                <ItemsRepeater ItemsSource="{x:Bind ViewModel.CheckItems}">
+                                    <ItemsRepeater.Layout>
+                                        <StackLayout Spacing="6" />
+                                    </ItemsRepeater.Layout>
+                                    <ItemsRepeater.ItemTemplate>
+                                        <DataTemplate x:DataType="vm:CheckItemViewModel">
+                                            <Grid ColumnSpacing="8">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="20" />
+                                                    <ColumnDefinition Width="*" />
+                                                </Grid.ColumnDefinitions>
+                                                <TextBlock Text="{x:Bind Glyph}" />
+                                                <StackPanel Grid.Column="1">
+                                                    <TextBlock Text="{x:Bind Name}" FontWeight="SemiBold" />
+                                                    <TextBlock Text="{x:Bind Detail}" FontSize="12" Opacity="0.8" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+                                                </StackPanel>
+                                            </Grid>
+                                        </DataTemplate>
+                                    </ItemsRepeater.ItemTemplate>
+                                </ItemsRepeater>
+                            </StackPanel>
+                        </ScrollViewer>
+
+                        <!-- 화면 -->
+                        <StackPanel x:Name="PanelLook" Margin="8,0,8,8" Visibility="Collapsed">
+                            <Border Style="{StaticResource MangaTag}" Margin="0,8,0,6">
+                                <TextBlock Style="{StaticResource MangaTagText}" Text="테마" />
+                            </Border>
+                            <RadioButtons SelectedIndex="{x:Bind ViewModel.ThemeIndex, Mode=TwoWay}">
+                                <RadioButton Content="화이트 — 종이 흰색에 먹선" />
+                                <RadioButton Content="다크 — 먹색 바탕에 흰 선" />
+                            </RadioButtons>
+                            <TextBlock Style="{StaticResource HintText}" Margin="0,6,0,0" Text="고르는 즉시 바뀌고 저장돼요. 아래 줄의 테마 버튼으로도 바꿀 수 있어요." />
+                        </StackPanel>
+
+                        <!-- 정보 -->
+                        <StackPanel x:Name="PanelAbout" Margin="8,0,8,8" Visibility="Collapsed">
+                            <StackPanel Orientation="Horizontal" Spacing="14" Margin="0,12,0,0">
+                                <controls:NekoLogo Width="72" Height="72" />
+                                <StackPanel VerticalAlignment="Center">
+                                    <TextBlock Text="NekoVup" FontSize="22" FontWeight="Bold" Foreground="{ThemeResource NekoText}" />
+                                    <TextBlock Text="{x:Bind ViewModel.VersionText}" Foreground="{ThemeResource NekoHint}" />
+                                    <TextBlock Style="{StaticResource HintText}" Margin="0,4,0,0" Text="영상의 워터마크를 지우고 업스케일하는 프로그램" />
+                                </StackPanel>
+                            </StackPanel>
+
+                            <Border Style="{StaticResource MangaTag}">
+                                <TextBlock Style="{StaticResource MangaTagText}" Text="업데이트" />
+                            </Border>
+                            <StackPanel Orientation="Horizontal" Spacing="10">
+                                <Button Content="새 버전 확인" Click="OnCheckUpdateClick" IsEnabled="{x:Bind ViewModel.NotUpdating, Mode=OneWay}" />
+                                <TextBlock Text="{x:Bind ViewModel.UpdateStatus, Mode=OneWay}" VerticalAlignment="Center" TextWrapping="Wrap"
+                                           Foreground="{ThemeResource NekoHint}" MaxWidth="420" />
+                            </StackPanel>
+
+                            <Border Style="{StaticResource MangaTag}">
+                                <TextBlock Style="{StaticResource MangaTagText}" Text="바로 가기" />
+                            </Border>
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <Button Content="GitHub 열기" Click="OnOpenRepoClick" />
+                                <Button Content="설정 폴더 열기" Click="OnOpenDataFolderClick" />
+                                <Button x:Name="UninstallButton" Content="프로그램 제거" Click="OnUninstallClick" Visibility="Collapsed" />
+                            </StackPanel>
+                            <TextBlock Style="{StaticResource HintText}" Margin="0,12,0,0"
+                                       Text="FFmpeg · ProPainter · Video2X를 불러 써요. 각 도구는 저마다의 라이선스를 따라요 (ProPainter는 비상업적 용도만 허용)." />
+                        </StackPanel>
+                    </Grid>
+                </Border>
+            </Grid>
+        </ContentDialog>
+    </Grid>
+</Window>

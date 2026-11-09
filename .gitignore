@@ -1,0 +1,10 @@
+bin/
+obj/
+.vs/
+*.user
+publish/
+TestResults/
+# 작업 중간 산출물
+.nekovup/
+*.tmp
+Releases/

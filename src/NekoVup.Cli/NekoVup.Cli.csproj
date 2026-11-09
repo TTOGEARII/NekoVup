@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>NekoVup.Cli</RootNamespace>
+    <AssemblyName>nekovup</AssemblyName>
+    <PublishAot>true</PublishAot>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\NekoVup.Core\NekoVup.Core.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,50 @@
+name: Release
+
+# v1.0.1 처럼 v로 시작하는 태그를 푸시하면 설치 파일을 빌드해 GitHub Release로 배포한다.
+# 배포된 릴리스는 앱이 시작할 때 자동으로 감지해 업데이트 버튼을 띄운다 (Velopack).
+on:
+  push:
+    tags: [ 'v*' ]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Get version from tag
+        id: ver
+        shell: pwsh
+        run: '"version=$($env:GITHUB_REF_NAME.TrimStart(''v''))" | Out-File -FilePath $env:GITHUB_OUTPUT -Append'
+
+      - name: Install Velopack CLI
+        # 프로젝트의 Velopack 패키지와 같은 버전으로 고정한다. 어긋나면 설치 파일이 멈춘다.
+        run: dotnet tool install -g vpk --version 1.2.161
+
+      - name: Download previous releases (for delta updates)
+        run: vpk download github --repoUrl https://github.com/TTOGEARII/NekoVup --token ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
+
+      - name: Publish and pack installer
+        shell: pwsh
+        run: ./tools/pack.ps1 -Version ${{ steps.ver.outputs.version }}
+
+      - name: Upload to GitHub Release
+        run: vpk upload github --repoUrl https://github.com/TTOGEARII/NekoVup --publish --releaseName "NekoVup v${{ steps.ver.outputs.version }}" --tag ${{ github.ref_name }} --token ${{ secrets.GITHUB_TOKEN }}
+
+      # 명령줄 판(nekovup.exe)도 같은 릴리스에 붙인다.
+      - name: Attach command-line build
+        shell: pwsh
+        run: |
+          ./tools/publish-cli.ps1
+          Compress-Archive publish/cli/nekovup.exe nekovup-cli-win-x64.zip
+          gh release upload ${{ github.ref_name }} nekovup-cli-win-x64.zip --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

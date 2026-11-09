@@ -1,0 +1,25 @@
+<UserControl
+    x:Class="NekoVup.App.Controls.NekoLogo"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    IsTabStop="False"
+    IsHitTestVisible="False">
+    <!-- 먹선 고양이 + 선글라스. 좌표계 0..100. 아이콘(tools\gen-icon.ps1)과 같은 도형이므로 바꿀 때는 함께 고칠 것.
+         먹색·종이색을 테마 브러시로 그려서 화이트/다크에서 저절로 반전된다. -->
+    <Viewbox>
+        <Canvas Width="100" Height="100">
+            <Path Fill="{ThemeResource NekoBg}" Stroke="{ThemeResource NekoStroke}" StrokeThickness="7" StrokeLineJoin="Miter"
+                  Data="M 22,42 L 12,8 L 40,22 L 60,22 L 88,8 L 78,42 C 88,50 90,66 82,78 C 70,92 30,92 18,78 C 10,66 12,50 22,42 Z" />
+            <Path Stroke="{ThemeResource NekoStroke}" StrokeThickness="3.4" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                  Data="M 6,61 L 22,63 M 6,72 L 22,69 M 94,61 L 78,63 M 94,72 L 78,69" />
+            <Path Stroke="{ThemeResource NekoStroke}" StrokeThickness="4" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                  Data="M 50,68 L 50,72 M 41,72 Q 45.5,78 50,72 Q 54.5,78 59,72" />
+            <Path Stroke="{ThemeResource NekoStroke}" StrokeThickness="4.5" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                  Data="M 24,46 L 15,42 M 76,46 L 85,42 M 46,47 L 54,47" />
+            <Path Fill="{ThemeResource NekoStroke}" Stroke="{ThemeResource NekoStroke}" StrokeThickness="2" StrokeLineJoin="Round"
+                  Data="M 23,44 L 47,44 L 46,55 Q 44,63 35,63 Q 26,63 24,55 Z M 53,44 L 77,44 L 76,55 Q 74,63 65,63 Q 56,63 54,55 Z" />
+            <Path Stroke="{ThemeResource NekoBg}" StrokeThickness="2.4" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                  Data="M 28,54 L 33,48 M 58,54 L 63,48" />
+        </Canvas>
+    </Viewbox>
+</UserControl>

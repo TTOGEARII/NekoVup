@@ -1,0 +1,166 @@
+using System.Buffers;
+using System.Globalization;
+using NekoVup.Core.Chunks;
+using NekoVup.Core.Imaging;
+
+namespace NekoVup.Core.Pipeline;
+
+/// <summary>
+/// 조각별 ProPainter 결과를 하나의 프레임 열로 합친다.
+/// 겹치는 구간은 가중 평균으로 부드럽게 넘기고, 알파를 붙여 RGBA PNG로 저장한다(ffmpeg가 원본 위에 얹는다).
+/// </summary>
+public static class ChunkMerger
+{
+    /// <summary>ProPainter가 <c>--save_frames</c>로 내놓는 프레임 폴더: &lt;출력 루트&gt;/&lt;입력 폴더 이름&gt;/frames.</summary>
+    public static string ChunkFramesDir(string inpaintRoot, ChunkRange chunk) =>
+        Path.Combine(inpaintRoot, ChunkName(chunk), "frames");
+
+    public static string ChunkName(ChunkRange chunk) => "c" + chunk.Index.ToString("D4", CultureInfo.InvariantCulture);
+
+    /// <summary>ProPainter 출력 파일 이름: 0부터 세는 4자리 번호.</summary>
+    public static string ChunkFrameName(int indexInChunk) => indexInChunk.ToString("D4", CultureInfo.InvariantCulture) + ".png";
+
+    /// <summary>ffmpeg의 %06d.png와 맞춘 이름: 1부터 세는 6자리 번호.</summary>
+    public static string SequenceFrameName(int frame) => (frame + 1).ToString("D6", CultureInfo.InvariantCulture) + ".png";
+
+    /// <param name="inpaintRoot">ProPainter 출력 루트.</param>
+    /// <param name="outputDir">합친 RGBA 프레임을 쓸 폴더.</param>
+    /// <param name="alpha">영역 크기의 알파 (<see cref="MaskBuilder.BuildAlpha"/>).</param>
+    public static void Merge(
+        string inpaintRoot, IReadOnlyList<ChunkRange> chunks, string outputDir,
+        int regionWidth, int regionHeight, byte[] alpha,
+        IProgress<int>? progress, CancellationToken cancellationToken)
+    {
+        if (alpha.Length != regionWidth * regionHeight) throw new ArgumentException("알파 크기가 영역과 다릅니다.", nameof(alpha));
+        Directory.CreateDirectory(outputDir);
+        int frameCount = chunks[^1].End;
+
+        // 알파가 0인 곳은 색도 0으로 비워 파일을 작게 만든다. 다만 색 정보는 2×2로 묶여 섞이므로(yuv420)
+        // 알파 경계 바로 바깥 2픽셀까지는 색을 남겨, 가장자리 색이 검게 물들지 않게 한다.
+        var keep = new byte[alpha.Length];
+        ImageOps.Dilate(alpha, keep, regionWidth, regionHeight, 2);
+
+        int done = 0;
+        var gate = new Lock();
+        var options = new ParallelOptions { CancellationToken = cancellationToken, MaxDegreeOfParallelism = Math.Max(1, Environment.ProcessorCount - 1) };
+        Parallel.For(0, frameCount, options, frame =>
+        {
+            string target = Path.Combine(outputDir, SequenceFrameName(frame));
+            // 완성된 파일만 최종 이름을 가지므로(임시 이름으로 쓴 뒤 바꿈) 이미 있으면 건너뛰어도 안전하다.
+            if (!File.Exists(target))
+            {
+                MergeFrame(inpaintRoot, chunks, frame, regionWidth, regionHeight, alpha, keep, target);
+            }
+            // 여러 스레드가 동시에 끝내므로, 세는 것과 알리는 것을 한데 묶어야 진행률이 뒤로 가지 않는다.
+            if (progress is not null)
+            {
+                lock (gate) progress.Report(++done);
+            }
+        });
+    }
+
+    private static void MergeFrame(
+        string inpaintRoot, IReadOnlyList<ChunkRange> chunks, int frame,
+        int regionWidth, int regionHeight, byte[] alpha, byte[] keep, string target)
+    {
+        var weights = Crossfade.Weights(chunks, frame);
+        int pixels = regionWidth * regionHeight;
+
+        byte[]? blended = null;
+        float[]? accumulator = null;
+        byte[]? resized = null;
+        var rgba = ArrayPool<byte>.Shared.Rent(pixels * 4);
+        try
+        {
+            int srcWidth = 0, srcHeight = 0;
+            for (int k = 0; k < weights.Count; k++)
+            {
+                var (chunk, weight) = weights[k];
+                string path = Path.Combine(ChunkFramesDir(inpaintRoot, chunk), ChunkFrameName(frame - chunk.Start));
+                var file = PngCodec.ReadFilePooled(path, out int fileLength);
+                try
+                {
+                    var png = file.AsSpan(0, fileLength);
+                    var header = PngCodec.ReadHeader(png);
+                    if (k == 0)
+                    {
+                        (srcWidth, srcHeight) = (header.Width, header.Height);
+                        blended = ArrayPool<byte>.Shared.Rent(srcWidth * srcHeight * 3);
+                    }
+                    else if (header.Width != srcWidth || header.Height != srcHeight)
+                    {
+                        throw new InvalidDataException($"조각마다 프레임 크기가 다릅니다: {path}");
+                    }
+
+                    int length = srcWidth * srcHeight * 3;
+                    if (weights.Count == 1)
+                    {
+                        PngCodec.Decode(png, blended, 3);
+                    }
+                    else
+                    {
+                        // 겹치는 구간: 가중 평균
+                        accumulator ??= ArrayPool<float>.Shared.Rent(length);
+                        var scratch = ArrayPool<byte>.Shared.Rent(length);
+                        try
+                        {
+                            PngCodec.Decode(png, scratch, 3);
+                            if (k == 0)
+                                for (int i = 0; i < length; i++) accumulator[i] = scratch[i] * weight;
+                            else
+                                for (int i = 0; i < length; i++) accumulator[i] += scratch[i] * weight;
+                        }
+                        finally
+                        {
+                            ArrayPool<byte>.Shared.Return(scratch);
+                        }
+                    }
+                }
+                finally
+                {
+                    ArrayPool<byte>.Shared.Return(file);
+                }
+            }
+
+            if (accumulator is not null)
+            {
+                int length = srcWidth * srcHeight * 3;
+                for (int i = 0; i < length; i++) blended![i] = (byte)Math.Clamp((int)(accumulator[i] + 0.5f), 0, 255);
+            }
+
+            // ProPainter가 축소해서 처리했다면 영역 크기로 되돌린다.
+            ReadOnlySpan<byte> rgb = blended;
+            if (srcWidth != regionWidth || srcHeight != regionHeight)
+            {
+                resized = ArrayPool<byte>.Shared.Rent(pixels * 3);
+                ImageOps.ResizeBicubic(blended, srcWidth, srcHeight, resized, regionWidth, regionHeight, 3);
+                rgb = resized;
+            }
+
+            var output = rgba.AsSpan(0, pixels * 4);
+            for (int i = 0; i < pixels; i++)
+            {
+                if (keep[i] == 0)
+                {
+                    output.Slice(i * 4, 4).Clear();
+                    continue;
+                }
+                output[i * 4] = rgb[i * 3];
+                output[i * 4 + 1] = rgb[i * 3 + 1];
+                output[i * 4 + 2] = rgb[i * 3 + 2];
+                output[i * 4 + 3] = alpha[i];
+            }
+
+            string temp = target + ".tmp";
+            PngCodec.Write(temp, output, regionWidth, regionHeight, 4);
+            File.Move(temp, target, overwrite: true);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(rgba);
+            if (blended is not null) ArrayPool<byte>.Shared.Return(blended);
+            if (accumulator is not null) ArrayPool<float>.Shared.Return(accumulator);
+            if (resized is not null) ArrayPool<byte>.Shared.Return(resized);
+        }
+    }
+}

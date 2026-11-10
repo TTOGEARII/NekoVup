@@ -322,18 +322,47 @@ public class FfmpegCommandsTests
     [InlineData("out.mkv", "pcm_s16le", "copy")]
     [InlineData("out.mkv", "dts", "copy")]
     [InlineData("OUT.MOV", "wmav2", "aac")]
+    // 형식마다 받는 것이 다르다 (내장 ffmpeg로 하나씩 복사해 본 결과).
+    [InlineData("out.mov", "mp3", "copy")]
+    [InlineData("out.mov", "flac", "aac")]
+    [InlineData("out.mov", "opus", "aac")]
+    [InlineData("out.m4v", "ac3", "copy")]
+    [InlineData("out.m4v", "mp3", "aac")]
+    [InlineData("out.m4v", "eac3", "aac")]
+    [InlineData("out.m4v", "flac", "aac")]
+    [InlineData("out.MKV", "TrueHD", "copy")]
+    [InlineData("out.mkv", "pcm_dvd", "flac")]
+    [InlineData("out.mkv", "pcm_bluray", "flac")]
+    [InlineData("out.mkv", "adpcm_ima_qt", "flac")]
+    [InlineData("out.mkv", "unknown", "flac")]
     public void Audio_Is_Copied_Unless_Container_Cannot_Hold_It(string output, string codec, string expected)
     {
-        var args = FfmpegCommands.AudioArguments(Info(audio: codec), output);
-        Assert.Equal(expected, args[1]);
-        if (expected == "aac") Assert.Equal(["-c:a", "aac", "-b:a", "192k"], args);
+        Assert.Equal(expected, FfmpegCommands.AudioHandling(codec, output));
+
+        string[] want = expected == "aac" ? ["-c:a", "aac", "-b:a", "192k"] : ["-c:a", expected];
+        Assert.Equal(want, FfmpegCommands.AudioArguments(Info(audio: codec), output));
     }
 
     [Fact]
-    public void Audio_Transcodes_If_Any_Stream_Is_Incompatible()
+    public void Audio_Is_Decided_Per_Stream()
     {
-        Assert.Equal("aac", FfmpegCommands.AudioArguments(Info(audio: ["aac", "truehd"]), "o.mp4")[1]);
+        // 못 담는 스트림만 바꾸고 나머지는 그대로 복사한다.
+        Assert.Equal(["-c:a:0", "copy", "-c:a:1", "aac", "-b:a:1", "192k"], FfmpegCommands.AudioArguments(Info(audio: ["aac", "truehd"]), "o.mp4"));
+        Assert.Equal(["-c:a:0", "flac", "-c:a:1", "copy"], FfmpegCommands.AudioArguments(Info(audio: ["pcm_dvd", "ac3"]), "o.mkv"));
+
+        // 전부 같으면 한 번에 적는다.
+        Assert.Equal(["-c:a", "copy"], FfmpegCommands.AudioArguments(Info(audio: ["ac3", "dts"]), "o.mkv"));
+        Assert.Equal(["-c:a", "aac", "-b:a", "192k"], FfmpegCommands.AudioArguments(Info(audio: ["dts", "truehd"]), "o.mp4"));
         Assert.Empty(FfmpegCommands.AudioArguments(Info(), "o.mp4"));
+    }
+
+    [Fact]
+    public void Converted_Audio_Is_Named_For_The_Log()
+    {
+        Assert.Equal(["truehd → AAC"], FfmpegCommands.ConvertedAudio(Info(audio: ["aac", "truehd"]), "o.mp4"));
+        Assert.Equal(["pcm_dvd → FLAC", "알 수 없음 → FLAC"], FfmpegCommands.ConvertedAudio(Info(audio: ["pcm_dvd", "ac3", "unknown"]), "o.mkv"));
+        Assert.Empty(FfmpegCommands.ConvertedAudio(Info(audio: ["aac", "dts"]), "o.mkv"));
+        Assert.Empty(FfmpegCommands.ConvertedAudio(Info(), "o.mkv"));
     }
 
     [Theory]

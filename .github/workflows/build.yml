@@ -34,6 +34,12 @@ jobs:
         # 프로젝트의 Velopack 패키지와 같은 버전으로 고정한다. 어긋나면 설치 파일이 멈춘다.
         run: dotnet tool install -g vpk --version 1.2.161
 
+      - name: Cache bundled tool downloads
+        uses: actions/cache@v4
+        with:
+          path: build/downloads
+          key: tools-${{ hashFiles('tools/fetch-tools.ps1') }}
+
       - name: Publish and pack installer
         shell: pwsh
         run: ./tools/pack.ps1

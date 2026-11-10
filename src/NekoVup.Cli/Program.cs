@@ -1,9 +1,11 @@
 using System.Globalization;
 using System.Text;
 using NekoVup.Core.Chunks;
+using NekoVup.Core.Media;
 using NekoVup.Core.Pipeline;
 using NekoVup.Core.Processes;
 using NekoVup.Core.Regions;
+using NekoVup.Core.Runtime;
 using NekoVup.Core.Settings;
 
 namespace NekoVup.Cli;
@@ -15,7 +17,8 @@ internal static class Program
     private static async Task<int> Main(string[] args)
     {
         Console.OutputEncoding = new UTF8Encoding(false);
-        if (args.Length == 0 || args[0] is "-h" or "--help" or "help")
+        // "nekovup run --help"처럼 명령 뒤에 적어도 도움말을 보여 준다 (그냥 두면 "--help 뒤에 값이 필요합니다"가 된다).
+        if (args.Length == 0 || args[0] is "-h" or "--help" or "help" || args.Skip(1).Any(a => a is "-h" or "--help"))
         {
             Console.WriteLine(Usage);
             return args.Length == 0 ? ExitUsage : ExitOk;
@@ -37,6 +40,7 @@ internal static class Program
                 "plan" => await PlanAsync(options, cancel.Token),
                 "run" => await RunAsync(options, cancel.Token),
                 "check" => await CheckAsync(options, cancel.Token),
+                "setup" => await SetupAsync(options, cancel.Token),
                 "settings" => Settings(options),
                 _ => throw new UsageException($"알 수 없는 명령: {args[0]}"),
             };
@@ -52,9 +56,17 @@ internal static class Program
             Console.Error.WriteLine("취소되었습니다.");
             return ExitCancelled;
         }
-        catch (Exception ex) when (ex is JobException or ToolFailedException)
+        catch (Exception ex) when (ex is JobException or ToolFailedException or IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {
+            // 디스크가 꽉 찼거나 폴더에 쓸 수 없을 때, 값이 말이 안 될 때(빈 경로, 쓸 수 없는 글자가 든 경로, --overlap이 --chunk의 절반 초과)도 오류 추적 대신 한 줄로 알린다.
             Console.Error.WriteLine("오류: " + ex.Message);
+            return ExitFailed;
+        }
+        catch (Exception ex)
+        {
+            // 예상하지 못한 오류도 오류 추적을 쏟아내며 죽지 않게 한 줄로 알린다 (추적은 --verbose일 때만).
+            Console.Error.WriteLine($"오류: 예기치 못한 오류입니다 ({ex.GetType().Name}): {ex.Message}");
+            if (args.Contains("--verbose")) Console.Error.WriteLine(ex);
             return ExitFailed;
         }
     }
@@ -62,8 +74,9 @@ internal static class Program
     private static async Task<int> ProbeAsync(CommandLine cl, CancellationToken ct)
     {
         var settings = LoadSettings(cl);
-        var info = await new JobRunner(settings, new ToolRunner(), NullJobLog.Instance).ProbeAsync(cl.RequireInput(), ct);
-        cl.EnsureAllUsed();
+        string input = cl.RequireInput();
+        cl.EnsureAllUsed(); // 오타는 영상을 읽기 전에 알린다
+        var info = await new JobRunner(settings, new ToolRunner(), NullJobLog.Instance).ProbeAsync(input, ct);
         Console.WriteLine($"파일      : {info.Path}");
         Console.WriteLine($"크기      : {info.Width}x{info.Height}" + (info.Rotation != 0 ? $" (저장 {info.CodedWidth}x{info.CodedHeight}, 회전 {info.Rotation}°)" : ""));
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"프레임레이트: {info.Fps} ({info.Fps.Value:0.###} fps)"));
@@ -81,6 +94,13 @@ internal static class Program
         cl.EnsureAllUsed();
         var info = await new JobRunner(settings, new ToolRunner(), NullJobLog.Instance).ProbeAsync(request.InputPath, ct);
         var o = request.Options;
+        if (o.Mode != CleanMode.ProPainter)
+        {
+            // 영역 계획은 ProPainter에만 있다 — 박스 없이 업스케일만 고르면 박스가 없다는 엉뚱한 오류가 났다.
+            Console.WriteLine($"영상 {info.Width}x{info.Height}, {info.Fps} fps — plan은 ProPainter로 지울 때의 처리 영역·조각만 보여 줍니다 (지금은 --mode {o.Mode.ToString().ToLowerInvariant()}).");
+            return ExitOk;
+        }
+        JobRunner.ValidateProPainterOptions(o);
 
         IReadOnlyList<ProcessRegion> regions;
         try
@@ -116,6 +136,8 @@ internal static class Program
         bool verbose = cl.Flag("--verbose");
         var request = BuildRequest(cl, requireOutput: true);
         cl.EnsureAllUsed();
+        // 끝나지 못한 작업의 중간 파일 폴더를 적어 둔다 (제거할 때 지우려고). 설정 파일을 따로 준 실행(시험용)은 사용자 폴더에 적지 않는다.
+        if (cl.Value("--settings") is null) WorkFolders.RegistryPath = WorkFolders.DefaultRegistryPath;
 
         var gate = new Lock();
         var log = new DelegateJobLog((level, message) =>
@@ -156,26 +178,80 @@ internal static class Program
         return items.Any(i => i.Status == CheckStatus.Error) ? ExitFailed : ExitOk;
     }
 
+    /// <summary>ProPainter 파이썬 환경을 내려받아 준비하고 설정에 적는다 (창 화면 판은 처음 실행 때 자동으로 한다).</summary>
+    private static async Task<int> SetupAsync(CommandLine cl, CancellationToken ct)
+    {
+        string? settingsPath = cl.Value("--settings");
+        bool force = cl.Flag("--force");
+        bool verbose = cl.Flag("--verbose");
+        var settings = ReadSettings(settingsPath);
+        // 상대 경로를 그대로 설정에 적으면 다른 폴더에서 실행할 때 못 찾는다.
+        string root = Path.GetFullPath(cl.Value("--dir") ?? ProPainterSetup.ResolveRoot(settings));
+        cl.EnsureAllUsed();
+
+        if (!force && ProPainterSetup.IsInstalled(root))
+        {
+            Console.WriteLine($"이미 준비되어 있습니다: {root} (다시 하려면 --force)");
+        }
+        else
+        {
+            var gate = new Lock();
+            var log = new DelegateJobLog((level, message) =>
+            {
+                if (level == LogLevel.Detail && !verbose) return;
+                lock (gate) Console.WriteLine(level >= LogLevel.Warning ? "경고: " + message : message);
+            });
+            string? last = null;
+            var progress = new Progress<SetupProgress>(p =>
+            {
+                string line = string.Create(CultureInfo.InvariantCulture, $"[{p.Fraction * 100,3:0}%] {p.Step}{(p.Detail is null ? "" : " — " + p.Detail)}");
+                if (line == last) return;
+                last = line;
+                lock (gate) Console.WriteLine(line);
+            });
+            using var http = new HttpClient();
+            await new ProPainterSetup(new ToolRunner(), http, log).InstallAsync(root, progress, ct);
+        }
+
+        ProPainterSetup.Apply(settings, root);
+        SettingsStore.Save(settings, settingsPath);
+        Console.WriteLine($"설정에 적었습니다: python = {settings.Python}, propainter = {settings.ProPainterDir}");
+        return ExitOk;
+    }
+
     private static int Settings(CommandLine cl)
     {
         string? path = cl.Value("--settings");
-        var settings = SettingsStore.Load(path);
+        var settings = ReadSettings(path);
         bool changed = ApplyToolOverrides(cl, settings);
         cl.EnsureAllUsed();
         if (changed) SettingsStore.Save(settings, path);
+        // 내장 도구가 쓰이는 칸은 실제로 쓰는 경로를 함께 보여 준다.
+        var effective = BundledTools.Resolve(settings);
         Console.WriteLine($"설정 파일: {path ?? SettingsStore.DefaultPath}{(changed ? " (저장됨)" : "")}");
-        Console.WriteLine($"  ffmpeg     = {settings.Ffmpeg}");
-        Console.WriteLine($"  ffprobe    = {settings.Ffprobe}");
+        Console.WriteLine($"  ffmpeg     = {Show(settings.Ffmpeg, effective.Ffmpeg)}");
+        Console.WriteLine($"  ffprobe    = {Show(settings.Ffprobe, effective.Ffprobe)}");
         Console.WriteLine($"  python     = {settings.Python}");
         Console.WriteLine($"  propainter = {settings.ProPainterDir}");
-        Console.WriteLine($"  video2x    = {settings.Video2X}");
+        Console.WriteLine($"  video2x    = {Show(settings.Video2X, effective.Video2X)}");
         return ExitOk;
+
+        static string Show(string configured, string effective) =>
+            configured == effective ? configured : $"{configured}  → 내장 도구 {effective}";
     }
 
     private static AppSettings LoadSettings(CommandLine cl)
     {
-        var settings = SettingsStore.Load(cl.Value("--settings"));
+        var settings = ReadSettings(cl.Value("--settings"));
         ApplyToolOverrides(cl, settings);
+        return settings;
+    }
+
+    /// <summary>설정 파일을 읽는다. 읽지 못했으면 기본값으로 하되 알린다 (조용히 넘어가면 적어 둔 경로가 왜 안 먹는지 모른다).</summary>
+    private static AppSettings ReadSettings(string? path)
+    {
+        var settings = SettingsStore.Load(path, out string? error);
+        if (error is not null) Console.Error.WriteLine("경고: 설정 파일을 읽지 못해 기본값을 씁니다: " + error);
         return settings;
     }
 
@@ -193,7 +269,9 @@ internal static class Program
     private static JobRequest BuildRequest(CommandLine cl, bool requireOutput)
     {
         string input = cl.RequireInput();
-        string? output = cl.Value("-o") ?? cl.Value("--output");
+        // 둘 다 읽어 둔다 (하나만 읽으면 같이 적었을 때 다른 하나가 "알 수 없는 옵션"으로 걸린다).
+        string? shortOutput = cl.Value("-o"), longOutput = cl.Value("--output");
+        string? output = shortOutput ?? longOutput;
         if (requireOutput && output is null) throw new UsageException("출력 파일을 -o 로 지정하세요.");
 
         var boxes = new List<PixelRect>();
@@ -210,7 +288,15 @@ internal static class Program
             "anime" => UpscalePreset.Anime,
             "anime-hq" => UpscalePreset.AnimeHq,
             "real" => UpscalePreset.Real,
-            var other => throw new UsageException($"--upscale 은 none, anime, anime-hq, real 중 하나입니다: '{other}'"),
+            "old" or "old-video" => UpscalePreset.OldVideo,
+            var other => throw new UsageException($"--upscale 은 none, anime, anime-hq, real, old 중 하나입니다: '{other}'"),
+        };
+        var deinterlace = (cl.Value("--deinterlace") ?? "auto").ToLowerInvariant() switch
+        {
+            "auto" => Deinterlace.Auto,
+            "on" or "always" => Deinterlace.Always,
+            "off" or "never" => Deinterlace.Never,
+            var other => throw new UsageException($"--deinterlace 는 auto, on, off 중 하나입니다: '{other}'"),
         };
         // 박스 없이 업스케일만 고르면 워터마크 제거는 하지 않는다.
         string modeText = cl.Value("--mode") ?? (boxes.Count == 0 && upscale != UpscalePreset.None ? "none" : "propainter");
@@ -225,7 +311,8 @@ internal static class Program
             throw new UsageException("워터마크 위치를 --box x,y,w,h 로 하나 이상 지정하세요. (업스케일만 하려면 --upscale 만 적으세요)");
 
         var defaults = new JobOptions();
-        double? duration = cl.Double("--duration") ?? cl.Double("--test-seconds");
+        // 둘 다 읽어 둔다 (하나만 읽으면 같이 적었을 때 다른 하나가 "알 수 없는 옵션"으로 걸린다). 길이 0은 "전체"로 처리되므로 받지 않는다.
+        double? duration = cl.Double("--duration", positive: true), testSeconds = cl.Double("--test-seconds", positive: true);
         var options = new JobOptions
         {
             Mode = mode,
@@ -233,7 +320,7 @@ internal static class Program
             Scale = cl.Int("--scale") ?? defaults.Scale,
             GpuIndex = cl.Int("--gpu") ?? defaults.GpuIndex,
             StartSeconds = cl.Double("--start"),
-            DurationSeconds = duration,
+            DurationSeconds = duration ?? testSeconds,
             Region = new RegionOptions
             {
                 Pad = cl.Int("--pad") ?? defaults.Region.Pad,
@@ -245,6 +332,8 @@ internal static class Program
             Fp16 = !cl.Flag("--no-fp16"),
             Crf = cl.Int("--crf") ?? defaults.Crf,
             Preset = cl.Value("--preset") ?? defaults.Preset,
+            Sharpen = Math.Clamp(cl.Int("--sharpen") ?? defaults.Sharpen, 0, FfmpegCommands.MaxSharpen),
+            Deinterlace = deinterlace,
         };
 
         return new JobRequest
@@ -268,15 +357,19 @@ internal static class Program
           nekovup run   <입력> -o <출력> --box x,y,w,h …   워터마크 제거 (+ 업스케일)
           nekovup run   <입력> -o <출력> --upscale anime    업스케일만
           nekovup check                              외부 도구 설치 상태 점검
+          nekovup setup [--dir <폴더>] [--force]     ProPainter 파이썬 환경 내려받아 준비 (약 3 GB, 설정에 자동 반영)
           nekovup settings [도구 경로 옵션]           설정 보기 / 저장
 
         run 옵션:
           --box x,y,w,h        워터마크 위치 (여러 번 지정 가능, 화면에 보이는 영상 기준 픽셀)
           --mode propainter|delogo|none   워터마크 제거 방식 (기본 propainter, delogo는 빠른 모드, none은 제거 안 함)
-          --upscale none|anime|anime-hq|real   업스케일 방식 (기본 none)
-                               anime: 애니메이션·빠름, anime-hq: 애니메이션·고품질, real: 실사
+          --upscale none|anime|anime-hq|real|old   업스케일 방식 (기본 none)
+                               anime: 애니메이션·빠름, anime-hq: 애니메이션·고품질, real: 실사,
+                               old: 옛 비디오(캠코더·VHS) — RealBasicVSR, ProPainter 파이썬 환경 필요, 느림
           --scale 2|3|4        업스케일 배율 (기본 2)
           --gpu N              업스케일에 쓸 GPU 번호 (기본 0, nekovup check 로 확인)
+          --sharpen N          업스케일 뒤 선명도 0~100 (기본 0 = 안 함, 30~50 권장)
+          --deinterlace auto|on|off   인터레이스(빗살) 해제 (기본 auto = 파일 표기를 따름)
           --test-seconds N     앞 N초만 처리 (= --duration N)
           --start S --duration D     S초부터 D초 동안만 처리
           --pad N              박스 둘레 여백 (기본 96)
@@ -284,7 +377,7 @@ internal static class Program
           --chunk N --overlap N --subvideo N   조각 길이 100 / 겹침 10 / ProPainter subvideo 40
           --no-fp16            반정밀도 끄기 (VRAM을 더 쓴다)
           --crf N --preset P   최종 화질 (기본 18, veryfast)
-          --work <폴더>        중간 파일 폴더 (기본: 출력 폴더\.nekovup)
+          --work <폴더>        중간 파일을 둘 폴더. 그 안에 작업마다 폴더를 따로 만든다 (기본: 출력 폴더\.nekovup)
           --keep-work          끝나도 중간 파일을 남김
           --skip-disk-check    임시 공간 검사 생략
           --verbose            외부 도구 출력까지 모두 표시
@@ -334,7 +427,7 @@ internal sealed class ConsoleProgress(Lock gate) : IProgress<JobProgress>
 /// <summary>아주 단순한 인자 해석기: 첫 위치 인자 = 입력, 나머지는 "--이름 값" 또는 "--플래그".</summary>
 internal sealed class CommandLine
 {
-    private static readonly HashSet<string> Flags = ["--verbose", "--keep-work", "--skip-disk-check", "--no-fp16"];
+    private static readonly HashSet<string> Flags = ["--verbose", "--keep-work", "--skip-disk-check", "--no-fp16", "--force"];
 
     private readonly List<(string Name, string? Value)> _options = [];
     private readonly HashSet<int> _used = [];
@@ -371,10 +464,11 @@ internal sealed class CommandLine
         : int.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out int v) ? v
         : throw new UsageException($"{name} 에는 정수를 적으세요: '{text}'");
 
-    public double? Double(string name) =>
+    /// <summary>0 이상의 숫자. <paramref name="positive"/>면 0도 받지 않는다.</summary>
+    public double? Double(string name, bool positive = false) =>
         Value(name) is not { } text ? null
-        : double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out double v) && v >= 0 ? v
-        : throw new UsageException($"{name} 에는 0 이상의 숫자를 적으세요: '{text}'");
+        : double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out double v) && double.IsFinite(v) && (positive ? v > 0 : v >= 0) ? v
+        : throw new UsageException($"{name} 에는 {(positive ? "0보다 큰" : "0 이상의")} 숫자를 적으세요: '{text}'");
 
     /// <summary>해석되지 않은 옵션이 남아 있으면 오타일 가능성이 높으므로 알려 준다.</summary>
     public void EnsureAllUsed()

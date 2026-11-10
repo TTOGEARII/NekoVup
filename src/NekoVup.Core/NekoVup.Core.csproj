@@ -15,4 +15,9 @@
     <InternalsVisibleTo Include="NekoVup.Tests" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- 파이썬 추론 스크립트: 실행 파일 옆 scripts\ 폴더로 복사된다 (앱 게시 결과에도 따라간다). -->
+    <Content Include="Scripts\realbasicvsr.py" Link="scripts\realbasicvsr.py" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

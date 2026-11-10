@@ -50,6 +50,7 @@ public static class FfprobeParser
             ColorRange = Known(video.ColorRange),
             ColorPrimaries = Known(video.ColorPrimaries),
             ColorTransfer = Known(video.ColorTransfer),
+            FieldOrder = Known(video.FieldOrder),
             AudioCodecs = [.. streams.Where(s => s.CodecType == "audio").Select(s => s.CodecName ?? "unknown")],
             SubtitleCodecs = [.. streams.Where(s => s.CodecType == "subtitle").Select(s => s.CodecName ?? "unknown")],
         };
@@ -147,6 +148,7 @@ internal sealed class FfprobeStream
     public string? ColorRange { get; set; }
     public string? ColorPrimaries { get; set; }
     public string? ColorTransfer { get; set; }
+    public string? FieldOrder { get; set; }
     public Dictionary<string, string>? Tags { get; set; }
     public Dictionary<string, JsonElement>? Disposition { get; set; }
     public List<FfprobeSideData>? SideDataList { get; set; }

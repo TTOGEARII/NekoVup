@@ -12,33 +12,26 @@
 관리자 권한 없이 설치되고, 바탕 화면과 시작 메뉴에 바로 가기가 생깁니다.
 
 - **업데이트**: 새 버전이 나오면 프로그램 아래쪽 상태 줄에 업데이트 단추가 뜹니다. 누르면 내려받아 적용하고 다시 시작합니다.
-- **제거**: Windows 설정의 앱 목록, 또는 프로그램의 설정 → 정보 → 프로그램 제거.
-- 설치하지 않고 쓰려면 `NekoVup-win-Portable.zip`을 풀어서 실행하세요 (자동 업데이트는 되지 않습니다).
+- **제거**: Windows 설정의 앱 목록, 또는 프로그램의 설정 → 정보 → 프로그램 제거. 함께 들어 있던 도구, 자동으로 준비된 ProPainter 환경(`NekoVup-runtime` 폴더), 설정과 로그, 끝나지 못한 작업의 중간 파일(`.nekovup`·`NekoVup-work` 폴더)까지 모두 지워집니다. 직접 설치해서 경로만 적어 둔 도구는 건드리지 않습니다.
+- 설치하지 않고 쓰려면 `NekoVup-win-Portable.zip`을 풀어서 안의 `NekoVup` 폴더에서 실행하세요 (자동 업데이트는 되지 않습니다). 이 경우 제거 프로그램이 없으므로, 지울 때는 그 `NekoVup` 폴더와 함께 `NekoVup-runtime` 폴더, `%AppData%\NekoVup` 폴더를 직접 지우세요.
 
-필요한 환경: Windows 10/11 64비트. 워터마크 복원(ProPainter)에는 NVIDIA 그래픽카드(VRAM 8GB 권장)가 필요합니다.
+필요한 환경: Windows 10/11 64비트. 업스케일에는 Vulkan을 지원하는 그래픽카드, 워터마크 복원(ProPainter)에는 NVIDIA 그래픽카드(VRAM 8GB 권장)가 필요합니다.
 
-## 먼저 준비할 도구
+## 따로 설치할 것은 없습니다
 
-NekoVup은 아래 도구들을 불러서 씁니다. 도구는 프로그램에 들어 있지 않으니 따로 설치한 뒤,
-프로그램의 **설정 → 도구**에서 위치를 알려 주고 **환경 점검**으로 확인하세요.
+설치 파일에 **FFmpeg**(영상 처리)와 **Video2X**(업스케일)가 들어 있습니다.
 
-| 도구 | 쓰이는 곳 | 설치 |
+**워터마크 복원(ProPainter)** 은 처음 실행할 때 프로그램이 알아서 준비합니다 — 파이썬과 PyTorch, ProPainter와 모델 파일을 내려받아
+여유 공간이 가장 큰 드라이브의 `NekoVup-runtime` 폴더에 둡니다(약 3 GB 내려받기, 디스크 약 6 GB, 인터넷 필요). 화면 위쪽에 진행률이 보이고, 그동안 업스케일은 바로 쓸 수 있습니다.
+PyTorch가 너무 커서 설치 파일에 넣지 못해 이렇게 합니다. 중지했거나 실패했으면 **설정 → 도구 → ProPainter 자동 준비**로 다시 시작하세요.
+
+| 도구 | 쓰이는 곳 | 준비 |
 |---|---|---|
-| [FFmpeg](https://ffmpeg.org/) | 항상 필요 | `winget install Gyan.FFmpeg` |
-| [Video2X 6.4.0](https://github.com/k4yt3x/video2x/releases/tag/6.4.0) | 업스케일 | Windows 판을 받아 압축만 풀면 됩니다 |
-| [ProPainter](https://github.com/sczhou/ProPainter) | 워터마크 복원 | 아래 참고 (Python 3.11 필요) |
+| [FFmpeg](https://ffmpeg.org/) | 항상 | 들어 있음 |
+| [Video2X 6.4.0](https://github.com/k4yt3x/video2x/releases/tag/6.4.0) | 업스케일 | 들어 있음 |
+| [ProPainter](https://github.com/sczhou/ProPainter) + Python 3.11 + PyTorch | 워터마크 복원 | 처음 실행 때 자동 |
 
-ProPainter 설치 (PowerShell):
-
-```powershell
-git clone https://github.com/sczhou/ProPainter
-cd ProPainter
-py -3.11 -m venv venv
-venv\Scripts\python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-venv\Scripts\python -m pip install -r requirements.txt
-```
-
-처음 실행할 때 모델 파일을 자동으로 내려받습니다(인터넷 필요).
+이미 직접 설치한 FFmpeg·Video2X·ProPainter를 쓰고 싶으면 설정 → 도구에 경로를 적으면 그쪽을 씁니다. 비워 두면 들어 있는 것을 씁니다.
 
 ## 사용법
 
@@ -50,7 +43,7 @@ venv\Scripts\python -m pip install -r requirements.txt
 5. 처음에는 **앞부분만 시험 삼아 처리**를 켜고 10초쯤 돌려 결과를 확인해 보세요.
 6. **시작**을 누릅니다. 끝나면 타임라인 머리줄의 스위치로 원본과 결과를 번갈아 볼 수 있습니다.
 
-중간에 멈추거나 실패해도 같은 설정으로 다시 시작하면 끝난 부분은 건너뛰고 이어서 합니다.
+중간에 멈추거나 실패해도 같은 설정으로 다시 시작하면 끝난 단계는 건너뜁니다. 워터마크 복원(ProPainter)은 조각 단위로 이어서 하지만, 업스케일은 중간부터 이어 하지 못해 그 단계를 처음부터 다시 합니다.
 
 ### 워터마크 제거 방식
 
@@ -59,7 +52,8 @@ venv\Scripts\python -m pip install -r requirements.txt
 | ProPainter | 워터마크 둘레만 잘라 복원한 뒤 원본 위에 얹습니다. 느리지만 자연스럽습니다. |
 | delogo | 아주 빠르지만 뭉갠 자국이 남습니다. |
 
-복원한 부분만 원본에 얹기 때문에 워터마크 바깥 화면은 원본 그대로입니다.
+복원한 부분만 원본 화면 위에 얹기 때문에 워터마크 바깥은 복원 과정을 거치지 않습니다.
+다만 저장할 때 영상 전체를 다시 인코딩하므로(화질은 고급 옵션의 CRF) 파일이 원본과 똑같지는 않습니다.
 
 **제약**: 워터마크 위치가 영상 내내 같아야 합니다(고정된 로고). 움직이는 워터마크는 지원하지 않습니다.
 
@@ -71,15 +65,25 @@ venv\Scripts\python -m pip install -r requirements.txt
 |---|---|---|
 | 애니메이션 — 빠름 | 애니메이션, 만화풍 | 선을 또렷하게, 색 면을 매끈하게. 가장 빠릅니다. |
 | 애니메이션 — 고품질 | 애니메이션, 만화풍 | 더 느리지만 선과 디테일을 더 곱게 살립니다. |
-| 실사 | 카메라로 찍은 영상 | 피부·머리카락 같은 질감을 살립니다. 가장 느립니다. |
+| 실사 | 카메라로 찍은 영상 | 피부·머리카락 같은 질감을 살립니다. 느립니다. |
+| 옛 비디오 | 캠코더·VHS·DVD 녹화 등 SD 시절 영상 | 앞뒤 프레임을 함께 보는 영상 전용 복원 모델(RealBasicVSR)로 노이즈·번짐을 정리하며 키웁니다. 자동 준비되는 파이썬 환경이 필요하고, 1초에 1프레임쯤으로 느립니다. |
 
 배율은 2 · 3 · 4배 가운데 고릅니다.
 
+**인터레이스(빗살 무늬)**: 옛 캠코더·DVD·방송 녹화는 대부분 인터레이스 영상이라 그대로 키우면 빗살까지 커집니다. 파일에 표기가 있으면 자동으로 풀고(영상 정보 줄에 "인터레이스"로 표시),
+표기가 없는 옛 영상은 고급 옵션에서 "항상"을 고르세요.
+
+**기대치**: 어떤 모델도 2000년대 SD 영상을 요즘 촬영본처럼 만들지는 못합니다. 기록되지 않은 디테일을 만들어 내는 것이라 "깨끗하고 또렷해진 SD→HD" 정도가 현실적인 결과입니다.
+
+**선명도**: 업스케일 모델은 노이즈와 깨짐을 지우면서 경계를 부드럽게 만드는 쪽이라, 결과가 "깨끗해졌지만 흐릿하다"고 느껴질 수 있습니다.
+그럴 때 선명도를 30~50부터 올려 보세요. 업스케일 뒤에 경계만 골라 또렷하게 세웁니다(CAS). 너무 높이면 테두리가 하얗게 뜹니다.
+
 ### 저장
 
-- 오디오는 그대로 옮깁니다.
+- 오디오는 그대로 옮깁니다. 저장 형식에 담을 수 없는 오디오만 바꿉니다(`.mp4`에서는 AAC, `.mkv`에서는 FLAC).
 - **`.mkv`로 저장하면 자막과 글꼴 첨부도 유지됩니다.** `.mp4`로 저장하면 자막은 빠집니다.
 - 처리하는 동안 출력 폴더에 임시 폴더(`.nekovup`)가 생겼다가 끝나면 지워집니다. 여유 공간을 넉넉히 두세요.
+  출력 폴더가 OneDrive 안(OneDrive로 옮긴 바탕 화면·문서 등)이면 중간 파일 수십 GB가 동기화되지 않게, 대신 드라이브 바로 아래의 `NekoVup-work` 폴더(보통 ProPainter 환경과 같은 드라이브)에 만듭니다.
 
 ### 화면
 
@@ -88,11 +92,15 @@ venv\Scripts\python -m pip install -r requirements.txt
 ## 개인 정보
 
 영상 처리는 전부 내 PC 안에서만 이루어집니다. 영상이나 그 내용을 어디로도 보내지 않습니다.
-인터넷에 접속하는 것은 새 버전이 있는지 GitHub에 확인할 때뿐입니다.
 
-설정은 `%AppData%\NekoVup`에 저장되며 프로그램을 지워도 남습니다.
+인터넷에 접속하는 것은 새 버전이 있는지 GitHub에 확인할 때와, ProPainter 환경과 모델 파일(옛 비디오 방식의 모델 포함)을 처음 내려받을 때뿐입니다.
+
+설정은 `%AppData%\NekoVup`에 저장되며 프로그램을 제거하면 함께 지워집니다.
 
 ## 라이선스 참고
 
-이 프로그램이 불러 쓰는 도구는 각자의 라이선스를 따릅니다.
-ProPainter는 비상업적 용도만 허용하고(S-Lab License 1.0), Video2X는 AGPL-3.0입니다.
+이 프로그램이 불러 쓰는 도구는 각자의 라이선스를 따릅니다. NekoVup은 이 도구들을 별도 프로그램으로 실행할 뿐 코드를 포함하지 않습니다.
+
+- 함께 설치되는 [FFmpeg](https://ffmpeg.org/)는 GPL v3, [Video2X](https://github.com/k4yt3x/video2x)는 AGPL v3입니다. 본문과 출처는 설치 폴더의 `tools\THIRD-PARTY.txt`에 있습니다.
+- 자동으로 내려받는 [ProPainter](https://github.com/sczhou/ProPainter)는 **비상업적 용도만 허용**합니다(S-Lab License 1.0). NekoVup도 개인·비상업 용도로 쓰세요.
+- 옛 비디오 방식의 [RealBasicVSR](https://github.com/ckkelvinchan/RealBasicVSR) 모델(Apache 2.0)은 처음 쓸 때 내려받습니다(148 MB).

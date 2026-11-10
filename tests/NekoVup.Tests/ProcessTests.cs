@@ -16,6 +16,35 @@ public class ToolRunnerTests
     }
 
     [Fact]
+    public async Task Empty_Executable_Path_Gives_The_Same_Kind_Of_Error()
+    {
+        // 설정 파일에 "ffprobe": "" 처럼 빈 경로가 적혀 있을 때.
+        await Assert.ThrowsAsync<ToolFailedException>(() => TestTools.Runner.RunAsync(new ToolInvocation("", []), null, null, Ct));
+        await Assert.ThrowsAsync<ToolFailedException>(() => TestTools.Runner.CaptureBytesAsync(new ToolInvocation("", []), Ct));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_Failing_Output_Callback_Stops_The_Tool_And_Is_Reported(bool onStandardError)
+    {
+        // 디스크가 가득 차 로그를 못 쓸 때가 이렇다. 읽기를 그만두면 도구가 가득 찬 파이프에 막혀 영영 끝나지 않는다.
+        // (1,0,2)는 끝나지 않는 반복이다 — 도구를 멈춰 주지 않으면 이 테스트는 시간 초과로 실패한다.
+        var invocation = new ToolInvocation("cmd.exe", ["/c", "for /l %i in (1,0,2) do @echo line %i" + (onStandardError ? " 1>&2" : "")]);
+        int seen = 0;
+        void Sink(string line)
+        {
+            if (Interlocked.Increment(ref seen) == 3) throw new IOException("디스크가 가득 찼습니다");
+        }
+
+        var run = TestTools.Runner.RunAsync(invocation, onStandardError ? null : Sink, onStandardError ? Sink : null, Ct);
+        var ex = await Assert.ThrowsAsync<IOException>(() => run.WaitAsync(TimeSpan.FromSeconds(30), Ct));
+
+        Assert.Equal("디스크가 가득 찼습니다", ex.Message);
+        Assert.Equal(3, seen); // 실패한 뒤로는 콜백을 다시 부르지 않는다
+    }
+
+    [Fact]
     public async Task Captures_Output_Lines_And_Exit_Code()
     {
         var lines = new List<string>();
@@ -146,6 +175,38 @@ public class FileLinkerTests
         }
         finally
         {
+            TestTools.DeleteDir(dir);
+        }
+    }
+
+    [Fact]
+    public void Same_File_Is_Recognised_However_It_Is_Spelled()
+    {
+        string dir = TestTools.NewTempDir("같은 파일");
+        string junction = Path.Combine(dir, "정션");
+        try
+        {
+            string folder = Path.Combine(dir, "원본 폴더");
+            Directory.CreateDirectory(folder);
+            string file = Path.Combine(folder, "영상.mkv"), other = Path.Combine(folder, "다른 영상.mkv");
+            File.WriteAllText(file, "a");
+            File.WriteAllText(other, "a");
+            TestTools.MakeJunction(junction, folder);
+
+            Assert.True(FileLinker.SameFile(file, file.ToUpperInvariant()));
+            Assert.True(FileLinker.SameFile(file, Path.Combine(junction, "영상.mkv")));   // 다른 폴더 이름을 거친 경로
+            Assert.True(FileLinker.SameFile(file, @"\\?\" + file));                       // 접두사만 다른 경로
+            Assert.True(FileLinker.SameFile(file, Path.Combine(folder, "..", "원본 폴더", "영상.mkv")));
+
+            Assert.False(FileLinker.SameFile(file, other));                              // 내용이 같아도 다른 파일
+            Assert.False(FileLinker.SameFile(file, Path.Combine(junction, "다른 영상.mkv")));
+            Assert.False(FileLinker.SameFile(file, Path.Combine(folder, "없는 파일.mkv"))); // 아직 없는 출력
+            Assert.False(FileLinker.SameFile(Path.Combine(folder, "없음 1.mkv"), Path.Combine(folder, "없음 2.mkv")));
+            Assert.False(FileLinker.SameFile(file, folder));
+        }
+        finally
+        {
+            if (Directory.Exists(junction)) Directory.Delete(junction); // 정션만 지운다
             TestTools.DeleteDir(dir);
         }
     }

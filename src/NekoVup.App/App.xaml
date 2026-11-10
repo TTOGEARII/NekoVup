@@ -8,59 +8,82 @@
                 <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" />
             </ResourceDictionary.MergedDictionaries>
 
-            <!-- ── 만화 원고풍 팔레트: 종이 흰색 + 먹선 검정. 다크는 그대로 반전. 포인트도 색 대신 굵기와 반전으로 준다. ── -->
+            <!-- ── 영상 편집 도구풍 팔레트: 짙은 회색 패널 + 파란 강조색. 미리보기 바닥은 테마와 상관없이 어둡게 둔다. ── -->
             <ResourceDictionary.ThemeDictionaries>
-                <ResourceDictionary x:Key="Light">
-                    <SolidColorBrush x:Key="NekoBg" Color="#FFFFFF" />
-                    <SolidColorBrush x:Key="NekoCard" Color="#FFFFFF" />
-                    <SolidColorBrush x:Key="NekoCardHover" Color="#EFEFEF" />
-                    <SolidColorBrush x:Key="NekoText" Color="#111111" />
-                    <SolidColorBrush x:Key="NekoHint" Color="#595959" />
-                    <SolidColorBrush x:Key="NekoStroke" Color="#111111" />
-                    <SolidColorBrush x:Key="NekoCanvas" Color="#E8E8E8" />
-                    <SolidColorBrush x:Key="NekoWarnBg" Color="#33FFB020" />
-                    <SolidColorBrush x:Key="NekoWarnText" Color="#8A5A00" />
-                </ResourceDictionary>
                 <ResourceDictionary x:Key="Default">
-                    <SolidColorBrush x:Key="NekoBg" Color="#111111" />
-                    <SolidColorBrush x:Key="NekoCard" Color="#111111" />
-                    <SolidColorBrush x:Key="NekoCardHover" Color="#242424" />
-                    <SolidColorBrush x:Key="NekoText" Color="#F5F5F5" />
-                    <SolidColorBrush x:Key="NekoHint" Color="#A3A3A3" />
-                    <SolidColorBrush x:Key="NekoStroke" Color="#F5F5F5" />
-                    <SolidColorBrush x:Key="NekoCanvas" Color="#1A1A1A" />
+                    <SolidColorBrush x:Key="NekoBg" Color="#17181B" />
+                    <SolidColorBrush x:Key="NekoPanel" Color="#212226" />
+                    <SolidColorBrush x:Key="NekoHeader" Color="#2A2B30" />
+                    <SolidColorBrush x:Key="NekoStroke" Color="#3A3C43" />
+                    <SolidColorBrush x:Key="NekoText" Color="#E8E8EA" />
+                    <SolidColorBrush x:Key="NekoHint" Color="#9C9EA6" />
+                    <SolidColorBrush x:Key="NekoCanvas" Color="#0E0E10" />
+                    <SolidColorBrush x:Key="NekoTrack" Color="#18191C" />
+                    <SolidColorBrush x:Key="NekoAccent" Color="#5B9DFF" />
+                    <SolidColorBrush x:Key="NekoClip" Color="#2B3D5C" />
+                    <SolidColorBrush x:Key="NekoClipActive" Color="#3F6FBF" />
+                    <SolidColorBrush x:Key="NekoPlayhead" Color="#FF6B4A" />
+                    <SolidColorBrush x:Key="NekoLogoFace" Color="#F4F4F5" />
+                    <SolidColorBrush x:Key="NekoLogoInk" Color="#111111" />
                     <SolidColorBrush x:Key="NekoWarnBg" Color="#33FFB020" />
                     <SolidColorBrush x:Key="NekoWarnText" Color="#FFCF6E" />
                 </ResourceDictionary>
+                <ResourceDictionary x:Key="Light">
+                    <SolidColorBrush x:Key="NekoBg" Color="#E9EAEC" />
+                    <SolidColorBrush x:Key="NekoPanel" Color="#FAFAFB" />
+                    <SolidColorBrush x:Key="NekoHeader" Color="#EEEFF1" />
+                    <SolidColorBrush x:Key="NekoStroke" Color="#CDCFD5" />
+                    <SolidColorBrush x:Key="NekoText" Color="#1B1C1F" />
+                    <SolidColorBrush x:Key="NekoHint" Color="#666870" />
+                    <SolidColorBrush x:Key="NekoCanvas" Color="#2A2B30" />
+                    <SolidColorBrush x:Key="NekoTrack" Color="#DFE0E4" />
+                    <SolidColorBrush x:Key="NekoAccent" Color="#1F6FEB" />
+                    <SolidColorBrush x:Key="NekoClip" Color="#B9CDEE" />
+                    <SolidColorBrush x:Key="NekoClipActive" Color="#5A93E8" />
+                    <SolidColorBrush x:Key="NekoPlayhead" Color="#E5482A" />
+                    <SolidColorBrush x:Key="NekoLogoFace" Color="#FFFFFF" />
+                    <SolidColorBrush x:Key="NekoLogoInk" Color="#111111" />
+                    <SolidColorBrush x:Key="NekoWarnBg" Color="#33FFB020" />
+                    <SolidColorBrush x:Key="NekoWarnText" Color="#8A5A00" />
+                </ResourceDictionary>
             </ResourceDictionary.ThemeDictionaries>
 
-            <!-- 강조색 = 먹색. 화이트 테마의 컨트롤은 Dark 쪽 단계를, 다크 테마의 컨트롤은 Light 쪽 단계를 쓴다. -->
-            <Color x:Key="SystemAccentColor">#111111</Color>
-            <Color x:Key="SystemAccentColorDark1">#111111</Color>
-            <Color x:Key="SystemAccentColorDark2">#111111</Color>
-            <Color x:Key="SystemAccentColorDark3">#111111</Color>
-            <Color x:Key="SystemAccentColorLight1">#F5F5F5</Color>
-            <Color x:Key="SystemAccentColorLight2">#F5F5F5</Color>
-            <Color x:Key="SystemAccentColorLight3">#F5F5F5</Color>
+            <!-- 강조색. 라이트 테마의 컨트롤은 Dark 쪽 단계를, 다크 테마의 컨트롤은 Light 쪽 단계를 쓴다. -->
+            <Color x:Key="SystemAccentColor">#2F7DF6</Color>
+            <Color x:Key="SystemAccentColorDark1">#1F6FEB</Color>
+            <Color x:Key="SystemAccentColorDark2">#1A5FCC</Color>
+            <Color x:Key="SystemAccentColorDark3">#154FAD</Color>
+            <Color x:Key="SystemAccentColorLight1">#4A8FFA</Color>
+            <Color x:Key="SystemAccentColorLight2">#5B9DFF</Color>
+            <Color x:Key="SystemAccentColorLight3">#8ABBFF</Color>
 
-            <!-- 각진 모서리로 통일 -->
-            <CornerRadius x:Key="ControlCornerRadius">0</CornerRadius>
-            <CornerRadius x:Key="OverlayCornerRadius">0</CornerRadius>
-
-            <!-- 먹선 두른 원고 패널 -->
-            <Style x:Key="InkPanel" TargetType="Border">
-                <Setter Property="Background" Value="{ThemeResource NekoCard}" />
+            <!-- 패널: 얇은 테두리의 평평한 상자. 위에 머리줄(PanelHeader)을 얹어 쓴다. -->
+            <Style x:Key="Panel" TargetType="Border">
+                <Setter Property="Background" Value="{ThemeResource NekoPanel}" />
                 <Setter Property="BorderBrush" Value="{ThemeResource NekoStroke}" />
-                <Setter Property="BorderThickness" Value="2" />
-                <Setter Property="CornerRadius" Value="0" />
+                <Setter Property="BorderThickness" Value="1" />
+            </Style>
+            <Style x:Key="PanelHeader" TargetType="Border">
+                <Setter Property="Background" Value="{ThemeResource NekoHeader}" />
+                <Setter Property="BorderBrush" Value="{ThemeResource NekoStroke}" />
+                <Setter Property="BorderThickness" Value="0,0,0,1" />
+                <Setter Property="Padding" Value="10,0" />
+                <Setter Property="Height" Value="30" />
+            </Style>
+            <Style x:Key="PanelTitle" TargetType="TextBlock">
+                <Setter Property="FontSize" Value="12" />
+                <Setter Property="FontWeight" Value="SemiBold" />
+                <Setter Property="Foreground" Value="{ThemeResource NekoText}" />
+                <Setter Property="VerticalAlignment" Value="Center" />
             </Style>
 
-            <!-- 기능 켜고 끄는 카드 -->
-            <Style x:Key="NekoFeatureCard" TargetType="Border" BasedOn="{StaticResource InkPanel}">
-                <Setter Property="Padding" Value="16,12" />
+            <!-- 작업 단계 카드 -->
+            <Style x:Key="StepCard" TargetType="Border" BasedOn="{StaticResource Panel}">
+                <Setter Property="CornerRadius" Value="4" />
+                <Setter Property="Padding" Value="12,8" />
             </Style>
             <Style x:Key="CardTitle" TargetType="TextBlock">
-                <Setter Property="FontSize" Value="15" />
+                <Setter Property="FontSize" Value="14" />
                 <Setter Property="FontWeight" Value="SemiBold" />
                 <Setter Property="Foreground" Value="{ThemeResource NekoText}" />
             </Style>
@@ -70,21 +93,38 @@
                 <Setter Property="TextWrapping" Value="Wrap" />
             </Style>
 
-            <!-- 섹션 제목: 먹색 라벨 바 (원고 지시선·필름 자막 느낌) -->
-            <Style x:Key="MangaTag" TargetType="Border">
-                <Setter Property="Background" Value="{ThemeResource NekoStroke}" />
-                <Setter Property="Padding" Value="8,3" />
-                <Setter Property="HorizontalAlignment" Value="Left" />
-                <Setter Property="Margin" Value="0,14,0,6" />
+            <!-- 옵션 패널의 구역 제목: 위에 가는 구분선, 작은 회색 글자 -->
+            <Style x:Key="SectionHeader" TargetType="Border">
+                <Setter Property="BorderBrush" Value="{ThemeResource NekoStroke}" />
+                <Setter Property="BorderThickness" Value="0,1,0,0" />
+                <Setter Property="Padding" Value="0,10,0,8" />
+                <Setter Property="Margin" Value="0,14,0,0" />
             </Style>
-            <Style x:Key="MangaTagText" TargetType="TextBlock">
-                <Setter Property="Foreground" Value="{ThemeResource NekoBg}" />
-                <Setter Property="FontWeight" Value="Bold" />
+            <Style x:Key="SectionTitle" TargetType="TextBlock">
+                <Setter Property="Foreground" Value="{ThemeResource NekoHint}" />
+                <Setter Property="FontWeight" Value="SemiBold" />
+                <Setter Property="FontSize" Value="12" />
+                <Setter Property="CharacterSpacing" Value="40" />
+            </Style>
+
+            <!-- 시간 표시: 숫자 폭이 일정한 글꼴 -->
+            <Style x:Key="Timecode" TargetType="TextBlock">
+                <Setter Property="FontFamily" Value="Consolas" />
+                <Setter Property="FontSize" Value="13" />
+                <Setter Property="Foreground" Value="{ThemeResource NekoText}" />
+                <Setter Property="VerticalAlignment" Value="Center" />
+            </Style>
+
+            <!-- 아래 상태 줄의 단추: 테두리 없이 평평하게 -->
+            <Style x:Key="ToolButton" TargetType="Button" BasedOn="{StaticResource DefaultButtonStyle}">
+                <Setter Property="Background" Value="Transparent" />
+                <Setter Property="BorderThickness" Value="0" />
+                <Setter Property="Padding" Value="10,5" />
                 <Setter Property="FontSize" Value="12.5" />
             </Style>
 
-            <!-- 서류철 탭: 선택한 탭은 내용 패널과 같은 종이색이고 패널 윗선을 덮어 이어져 보인다. 나머지는 조금 낮고 바랜다. -->
-            <Style x:Key="FolderTab" TargetType="RadioButton">
+            <!-- 설정 창의 탭: 평평한 글자 탭, 고른 탭 아래에 강조색 줄 -->
+            <Style x:Key="FlatTab" TargetType="RadioButton">
                 <Setter Property="Foreground" Value="{ThemeResource NekoText}" />
                 <Setter Property="FontSize" Value="13.5" />
                 <Setter Property="MinWidth" Value="0" />
@@ -94,8 +134,11 @@
                 <Setter Property="Template">
                     <Setter.Value>
                         <ControlTemplate TargetType="RadioButton">
-                            <Border x:Name="Tab" Background="{ThemeResource NekoBg}" BorderBrush="{ThemeResource NekoStroke}"
-                                    BorderThickness="2,2,2,0" Padding="14,6" Margin="0,5,4,0">
+                            <Grid x:Name="Tab" Background="Transparent" Padding="14,8,14,0" Margin="0,0,4,0">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
                                 <VisualStateManager.VisualStateGroups>
                                     <VisualStateGroup x:Name="CommonStates">
                                         <VisualState x:Name="Normal" />
@@ -114,20 +157,20 @@
                                     <VisualStateGroup x:Name="CheckStates">
                                         <VisualState x:Name="Checked">
                                             <VisualState.Setters>
-                                                <Setter Target="Tab.Background" Value="{ThemeResource NekoCard}" />
-                                                <Setter Target="Tab.Margin" Value="0,0,4,-2" />
-                                                <Setter Target="Tab.Padding" Value="14,8,14,9" />
                                                 <Setter Target="Header.Opacity" Value="1" />
-                                                <Setter Target="Header.FontWeight" Value="Bold" />
+                                                <Setter Target="Header.FontWeight" Value="SemiBold" />
+                                                <Setter Target="Indicator.Opacity" Value="1" />
                                             </VisualState.Setters>
                                         </VisualState>
                                         <VisualState x:Name="Unchecked" />
                                         <VisualState x:Name="Indeterminate" />
                                     </VisualStateGroup>
                                 </VisualStateManager.VisualStateGroups>
-                                <ContentPresenter x:Name="Header" Content="{TemplateBinding Content}" Opacity="0.55"
+                                <ContentPresenter x:Name="Header" Content="{TemplateBinding Content}" Opacity="0.6"
                                                   HorizontalAlignment="Center" VerticalAlignment="Center" />
-                            </Border>
+                                <Rectangle x:Name="Indicator" Grid.Row="1" Height="2" Margin="0,7,0,0" Opacity="0"
+                                           Fill="{ThemeResource NekoAccent}" />
+                            </Grid>
                         </ControlTemplate>
                     </Setter.Value>
                 </Setter>

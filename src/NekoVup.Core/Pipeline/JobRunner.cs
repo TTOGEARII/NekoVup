@@ -5,6 +5,7 @@ using NekoVup.Core.Imaging;
 using NekoVup.Core.Media;
 using NekoVup.Core.Processes;
 using NekoVup.Core.Regions;
+using NekoVup.Core.Runtime;
 using NekoVup.Core.Settings;
 
 namespace NekoVup.Core.Pipeline;
@@ -17,8 +18,11 @@ namespace NekoVup.Core.Pipeline;
 /// </code>
 /// 인스턴스 하나로 동시에 여러 작업을 돌리지 않는다.
 /// </summary>
-public sealed class JobRunner(AppSettings settings, IToolRunner runner, IJobLog log)
+public sealed class JobRunner(AppSettings configured, IToolRunner runner, IJobLog log)
 {
+    /// <summary>내장 도구가 있으면 그쪽으로 바꾼 설정 (<see cref="BundledTools"/>).</summary>
+    private readonly AppSettings settings = BundledTools.Resolve(configured);
+
     public const string ProPainterScript = "inference_propainter.py";
 
     /// <summary>ProPainter 폴더 안에 잠깐 만드는 임시 폴더 이름.</summary>
@@ -59,6 +63,9 @@ public sealed class JobRunner(AppSettings settings, IToolRunner runner, IJobLog 
     public async Task<JobResult> RunAsync(JobRequest request, IProgress<JobProgress>? progress, CancellationToken cancellationToken)
     {
         var clock = Stopwatch.StartNew();
+        // 전체 경로로 바꾸면 CON.mp4 같은 이름은 장치 경로(\\.\CON)가 되어 "확장자가 틀렸다"는 엉뚱한 오류가 난다. 먼저 거른다.
+        if (IsReservedName(request.OutputPath))
+            throw new JobException($"Windows가 장치 이름으로 쓰는 이름(CON, PRN, AUX, NUL, COM1~9, LPT1~9)은 파일 이름으로 쓸 수 없습니다: {Path.GetFileName(request.OutputPath)}");
         string input = Path.GetFullPath(request.InputPath);
         string output = Path.GetFullPath(request.OutputPath);
         request = request with { InputPath = input, OutputPath = output };
@@ -67,35 +74,95 @@ public sealed class JobRunner(AppSettings settings, IToolRunner runner, IJobLog 
 
         if (!FfmpegCommands.IsSupportedOutput(output))
             throw new JobException("출력 파일 확장자는 .mp4, .mkv, .mov, .m4v 중 하나여야 합니다.");
-        if (string.Equals(input, output, StringComparison.OrdinalIgnoreCase))
+        // Windows가 받지 않는 글자가 이름에 있으면 마지막 인코딩에서야 실패한다 (복원을 다 끝낸 뒤). 시작하기 전에 알린다.
+        if (HasUnusableName(output))
+            throw new JobException($"출력 경로에 파일 이름으로 쓸 수 없는 글자(: * ? \" < > | 등)가 있습니다: {output}");
+        // 글자로만 비교하면 같은 파일을 다르게 적은 경우(드라이브 문자와 네트워크 경로, 정션 등)를 놓쳐 결과가 원본을 덮어쓴다.
+        if (FileLinker.SameFile(input, output))
             throw new JobException("출력 파일이 입력 파일과 같습니다. 다른 이름을 지정하세요.");
+        // 완성 전에는 "이름.partial.확장자"로 쓴다. 입력이 바로 그 이름이면 입력을 덮어쓰게 된다.
+        if (FileLinker.SameFile(input, PartialPath(output)))
+            throw new JobException("입력 파일 이름이 이 출력의 임시 파일 이름(.partial)과 같습니다. 출력 이름을 다르게 지정하세요.");
         if (options.Mode == CleanMode.None && !upscale)
             throw new JobException("할 일이 없습니다. 워터마크 제거 방식이나 업스케일 중 하나는 골라야 합니다.");
         if (options.Mode != CleanMode.None && request.Boxes.Count == 0)
             throw new JobException("워터마크 박스를 하나 이상 지정하세요.");
+        // 길이 0은 ffmpeg에 "제한 없음"으로 넘어가 영상 전체를 처리하게 된다 — 앞부분만 시험하려던 것이 몇 시간짜리 작업이 된다.
+        if (options.DurationSeconds is { } length && !(double.IsFinite(length) && length > 0))
+            throw new JobException("처리할 길이는 0보다 큰 숫자여야 합니다.");
+        if (options.StartSeconds is { } begin && !(double.IsFinite(begin) && begin >= 0))
+            throw new JobException("시작 지점은 0 이상의 숫자여야 합니다.");
+        // 화질·속도 값이 틀리면 마지막 인코딩에서야 실패한다 (복원을 다 끝낸 뒤). 시작하기 전에 알린다.
+        if (options.Crf is < 0 or > FfmpegCommands.MaxCrf)
+            throw new JobException($"화질(CRF)은 0~{FfmpegCommands.MaxCrf} 사이여야 합니다: {options.Crf}");
+        if (!FfmpegCommands.Presets.Contains(options.Preset))
+            throw new JobException($"인코딩 속도(preset)는 {string.Join(", ", FfmpegCommands.Presets)} 중 하나여야 합니다: {options.Preset}");
 
         UpscalePlan? plan = null;
         if (upscale)
         {
             try { plan = Video2X.Plan(options.Upscale, options.Scale); }
             catch (ArgumentException ex) { throw new JobException(ex.Message, ex); }
-            if (string.IsNullOrWhiteSpace(settings.Video2X) || !File.Exists(settings.Video2X))
+            if (plan.UsesPython)
+            {
+                if (string.IsNullOrWhiteSpace(settings.Python))
+                    throw new JobException("옛 비디오 방식(RealBasicVSR)은 ProPainter용 파이썬 환경이 필요합니다. 설정 → 도구에서 [ProPainter 자동 준비]를 누르세요.");
+                if (!File.Exists(RealBasicVsr.ScriptPath))
+                    throw new JobException($"추론 스크립트가 없습니다: {RealBasicVsr.ScriptPath}");
+            }
+            else if (string.IsNullOrWhiteSpace(settings.Video2X) || !File.Exists(settings.Video2X))
                 throw new JobException($"Video2X 실행 파일을 찾을 수 없습니다: {settings.Video2X}");
         }
+        bool usesPython = options.Mode == CleanMode.ProPainter || plan is { UsesPython: true };
+        // 파이썬·ProPainter를 둔 드라이브가 빠져 있으면 연결하라고 알린다 — "다시 준비하라"고 하면 다른 드라이브에 3 GB를 또 받는다.
+        // (명령줄 setup --dir로 이름을 바꾼 환경은 드라이브가 없으면 우리 것인지조차 알 수 없어 HoldRuntime이 거르지 못한다.)
+        if (usesPython && ProPainterSetup.MissingDrive(settings) is { } missingDrive)
+            throw new JobException($"ProPainter 파이썬 환경이 있는 드라이브({missingDrive})를 찾을 수 없습니다. 외장 드라이브라면 연결한 뒤 다시 시작하세요.");
+        // 우리가 준비한 파이썬 환경을 쓰는 작업은 끝날 때까지 "쓰는 중"으로 잡아 둔다 (다른 창에서 다시 준비해 지우지 못하게).
+        using var runtime = usesPython ? HoldRuntime() : null;
 
-        _progress = new ProgressPlan(progress, StagePlan(options.Mode, plan));
+        _progress = new ProgressPlan(progress, StagePlan(options.Mode, plan, plan is not null && ReencodesAtFinalize(plan, options)));
         _progress.Report(JobStage.Probe, 0);
+        // 설정에 적힌 도구 대신 내장 도구를 쓰게 됐으면(적힌 파일이 없을 때) 조용히 바꾸지 말고 알린다.
+        if (configured.Ffmpeg != settings.Ffmpeg && configured.Ffmpeg != "ffmpeg") _log.Warning($"설정의 ffmpeg({configured.Ffmpeg})를 찾을 수 없어 내장 도구를 씁니다.");
+        if (upscale && configured.Video2X != settings.Video2X && configured.Video2X.Length > 0) _log.Warning($"설정의 Video2X({configured.Video2X})를 찾을 수 없어 내장 도구를 씁니다.");
         var info = await ProbeAsync(input, cancellationToken).ConfigureAwait(false);
         if (options.StartSeconds is { } start && info.DurationSeconds > 0 && start >= info.DurationSeconds)
             throw new JobException("시작 지점이 영상 길이보다 뒤에 있습니다.");
-        Directory.CreateDirectory(Path.GetDirectoryName(output)!);
+        // 결과는 yuv420p(색 정보를 2×2로 묶는 형식)로 인코딩하므로 홀수 크기는 담지 못한다. 몇 시간 처리한 뒤 마지막 인코딩에서 실패하기 전에 알린다.
+        if (info.Width % 2 != 0 || info.Height % 2 != 0)
+            throw new JobException($"가로·세로 크기가 홀수인 영상({info.Width}x{info.Height})은 처리할 수 없습니다. 먼저 짝수 크기로 바꿔 주세요.");
+        // 화면 밖에 그린 박스는 빼고 처리한다. 다른 박스가 남아 있으면 작업은 그대로 끝나므로, 빠진 것을 알려야 워터마크가 왜 남았는지 안다.
+        if (options.Mode != CleanMode.None)
+        {
+            // delogo는 가장자리 1픽셀을 쓰지 못한다 (DelogoPlanner와 같은 기준).
+            var frame = options.Mode == CleanMode.Delogo ? new PixelRect(1, 1, info.Width - 2, info.Height - 2) : new PixelRect(0, 0, info.Width, info.Height);
+            foreach (var box in request.Boxes)
+                if (box.ClampTo(frame).IsEmpty)
+                    _log.Warning($"박스 ({box.X},{box.Y}) {box.Width}x{box.Height}는 화면({info.Width}x{info.Height}) 밖이라 처리하지 않습니다.");
+        }
+        EnsureWritableFolder(Path.GetDirectoryName(output)!);
 
         _log.Info(string.Create(CultureInfo.InvariantCulture,
             $"입력: {info.Width}x{info.Height}, {info.Fps} fps, {info.DurationSeconds:0.##}초, 오디오 {(info.HasAudio ? string.Join("/", info.AudioCodecs) : "없음")}"));
+        if (FfmpegCommands.ConvertedAudio(info, output) is { Count: > 0 } converted)
+            _log.Info($"이 출력 형식({Path.GetExtension(output)})에 그대로 담을 수 없는 오디오는 바꿔 담습니다: {string.Join(", ", converted)}");
+        if (options.ShouldDeinterlace(info))
+            _log.Info(info.IsInterlaced ? $"인터레이스 영상({info.FieldOrder}) — 빗살을 풀고 처리합니다." : "인터레이스 해제를 항상 켜서 처리합니다.");
+        else if (info.IsInterlaced)
+            _log.Warning($"인터레이스 영상({info.FieldOrder})인데 해제를 껐습니다. 빗살 무늬가 그대로 커집니다.");
         if (info.SubtitleCodecs.Count > 0 && !FfmpegCommands.KeepsSubtitles(output))
             _log.Warning("원본에 자막이 있지만 이 출력 형식에는 담지 않습니다. 자막을 유지하려면 출력을 .mkv로 지정하세요.");
+        else if (FfmpegCommands.DroppedSubtitleCodecs(info) is { Count: > 0 } dropped)
+            _log.Warning($"MKV에 옮겨 담을 수 없는 형식의 자막 {dropped.Count}개({string.Join(", ", dropped.Distinct())})는 빠집니다.");
+        if (IsHighBitDepth(info.PixelFormat))
+            _log.Warning($"원본은 10비트 이상 영상({info.PixelFormat})입니다. 결과는 8비트로 저장됩니다.");
 
         string partial = PartialPath(output);
+        // 앞선 실행이 완성본을 제자리에 옮기지 못하고 이 이름으로 남겨 뒀을 수 있다 (PlaceOutput).
+        // 이번 실행이 그 파일에 손대기 전에 실패하거나 취소되면 지우지 않는다.
+        var leftover = FileStamp(partial);
+        bool finished = false;
         try
         {
             int frames;
@@ -105,7 +172,9 @@ public sealed class JobRunner(AppSettings settings, IToolRunner runner, IJobLog 
             else
                 (frames, workDirectory) = await RunInWorkDirectoryAsync(request, info, plan, partial, cancellationToken).ConfigureAwait(false);
 
-            File.Move(partial, output, overwrite: true);
+            // 여기부터 partial은 완성본이다 (중간 파일은 이미 지웠다). 제자리에 놓지 못해도 지우면 안 된다.
+            finished = true;
+            output = PlaceOutput(partial, output);
             _progress.Report(JobStage.Finished, 1);
             _log.Info($"완료: {output}");
             return new JobResult(output, frames, clock.Elapsed, workDirectory);
@@ -117,7 +186,104 @@ public sealed class JobRunner(AppSettings settings, IToolRunner runner, IJobLog 
         }
         finally
         {
-            TryDeleteFile(partial);
+            if (!finished && !(leftover is { } before && before == FileStamp(partial))) TryDeleteFile(partial);
+        }
+    }
+
+    /// <summary>
+    /// 설정의 파이썬이 우리가 준비한 환경이면 그 환경을 "쓰는 중"으로 잡는다. 준비가 끝나 있지 않으면(다시 준비하다 중지·실패해
+    /// 파이썬이 지워진 채) 영상 전체를 추출한 뒤 첫 조각에서 파이썬 오류로 실패하기 전에 알린다. 사용자가 직접 깐 파이썬이면 아무것도 하지 않는다.
+    /// </summary>
+    private FileStream? HoldRuntime()
+    {
+        if (ProPainterSetup.RootOf(settings) is not { } root) return null;
+        // 준비는 끝났는데 드라이브를 뽑아 둔 것일 수 있다 — "다시 준비하라"고 하면 다른 드라이브에 3 GB를 또 받는다.
+        if (!Directory.Exists(root))
+            throw new JobException($"ProPainter 파이썬 환경 폴더를 찾을 수 없습니다: {root} — 외장 드라이브에 있다면 연결한 뒤 다시 시작하세요. 지웠다면 설정 → 도구에서 [ProPainter 자동 준비]를 누르세요 (명령줄은 setup).");
+        FileStream? hold = null;
+        try
+        {
+            hold = ProPainterSetup.HoldForUse(root);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // 폴더가 없거나(뽑아 둔 드라이브) 쓸 수 없다 — 바로 아래 확인에서 걸러진다
+        }
+        if (ProPainterSetup.IsInstalled(root)) return hold;
+        hold?.Dispose();
+        // 앱은 알림 줄에 첫 줄만 보여 주므로 할 일까지 한 줄에 적는다.
+        throw new JobException($"ProPainter 파이썬 환경 준비가 끝나지 않았습니다 (중지했거나 실패): {root} — 설정 → 도구에서 [ProPainter 자동 준비]를 다시 누르세요 (명령줄은 setup). ProPainter와 옛 비디오 방식에 필요합니다.");
+    }
+
+    /// <summary>
+    /// 출력 폴더를 만들고 파일을 쓸 수 있는지 미리 확인한다. 폴더는 만들어지지만 파일은 못 만드는 곳(일반 권한으로 본 C:\ 바로 아래,
+    /// 읽기 전용 공유 폴더 등)이면 작업 폴더까지 만들어 몇 시간 처리한 뒤 마지막 인코딩에서야 실패한다.
+    /// </summary>
+    private static void EnsureWritableFolder(string folder)
+    {
+        try
+        {
+            Directory.CreateDirectory(folder);
+            // 이름이 겹치지 않게 임의로 짓고, 닫히면 저절로 지워지게 연다 (남은 .partial 파일 보호와 엉키지 않는다).
+            using var probe = new FileStream(Path.Combine(folder, $".nekovup-probe-{Guid.NewGuid():N}.tmp"),
+                FileMode.CreateNew, FileAccess.Write, FileShare.None, 1, FileOptions.DeleteOnClose);
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
+        {
+            bool driveRoot = Path.GetPathRoot(folder) is { } root
+                && Path.TrimEndingDirectorySeparator(root).Equals(Path.TrimEndingDirectorySeparator(folder), StringComparison.OrdinalIgnoreCase);
+            string hint = ex switch
+            {
+                DirectoryNotFoundException => "드라이브나 위쪽 폴더를 찾을 수 없습니다. 드라이브가 연결돼 있는지 확인하거나 다른 출력 폴더를 고르세요.",
+                UnauthorizedAccessException when driveRoot => "다른 출력 폴더를 고르세요. 드라이브 바로 아래(C:\\ 등)는 관리자 권한이 있어야 쓸 수 있습니다.",
+                _ => "다른 출력 폴더를 고르세요.",
+            };
+            throw new JobException($"출력 폴더에 파일을 만들 수 없습니다: {folder} ({ex.Message}) {hint}", ex);
+        }
+    }
+
+    /// <summary>파일이 그대로인지 알아보기 위한 표시 (마지막으로 쓴 때와 크기). 없으면 null.</summary>
+    private static (DateTime Written, long Length)? FileStamp(string path)
+    {
+        try
+        {
+            var file = new FileInfo(path);
+            return file.Exists ? (file.LastWriteTimeUtc, file.Length) : null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// 완성본을 출력 이름으로 옮긴다. 그 이름의 파일을 다른 프로그램이 붙잡고 있으면(앞서 만든 결과를 재생기로 열어 둔 채 다시 돌린 경우)
+    /// 덮어쓸 수 없다 — 몇 시간짜리 결과를 버리지 않고 옆에 다른 이름("이름 (2).mkv")으로 둔다.
+    /// </summary>
+    private string PlaceOutput(string partial, string output)
+    {
+        try
+        {
+            File.Move(partial, output, overwrite: true);
+            return output;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            string directory = Path.GetDirectoryName(output)!, stem = Path.GetFileNameWithoutExtension(output), extension = Path.GetExtension(output);
+            for (int n = 2; n <= 20; n++)
+            {
+                string other = Path.Combine(directory, $"{stem} ({n}){extension}");
+                if (File.Exists(other)) continue;
+                try
+                {
+                    File.Move(partial, other);
+                    _log.Warning($"출력 파일을 덮어쓰지 못해 ({ex.Message}) 다른 이름으로 저장했습니다: {other} — 다른 프로그램이 열어 두었거나 읽기 전용인지 확인하세요.");
+                    return other;
+                }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
+            throw new JobException($"결과를 출력 이름으로 옮기지 못했습니다 ({ex.Message}). 완성된 파일은 여기 있습니다: {partial}", ex);
         }
     }
 
@@ -138,11 +304,25 @@ public sealed class JobRunner(AppSettings settings, IToolRunner runner, IJobLog 
             {
                 throw new JobException(ex.Message, ex);
             }
+            // 영역은 8의 배수 크기로만 잡을 수 있어, 그런 크기가 아닌 영상에서 화면 한쪽 끝에서 끝까지 걸친 박스는 가장자리가 영역 밖에 남는다.
+            foreach (var region in regions)
+            foreach (var box in region.Boxes)
+                if (box.X < region.Rect.X || box.Y < region.Rect.Y || box.Right > region.Rect.Right || box.Bottom > region.Rect.Bottom)
+                    _log.Warning($"박스 ({box.X},{box.Y}) {box.Width}x{box.Height}의 가장자리 몇 픽셀은 처리 영역({region.Rect.Width}x{region.Rect.Height}) 밖이라 복원되지 않습니다. 박스를 조금 줄이면 사라집니다.");
         }
 
         string key = JobManifest.ComputeKey(request);
-        string work = Path.GetFullPath(request.WorkDirectory ?? DefaultWorkDirectory(request.OutputPath, request.InputPath, key));
+        string work = JobWorkDirectory(request, key);
+        string workRoot = Path.GetDirectoryName(work)!;
         Directory.CreateDirectory(work);
+        // 작업이 끝나지 못하면 이 폴더가 남는다. 프로그램을 제거할 때 지울 수 있게 어디에 만들었는지 적어 둔다.
+        // 사용자가 직접 정한 폴더는 적지 않는다 — 제거할 때 통째로 지우면 안 되는 폴더다.
+        if (string.IsNullOrEmpty(request.WorkDirectory))
+        {
+            WorkFolders.Remember(workRoot);
+            if (Path.GetFileName(workRoot).Equals(WorkFolders.FallbackFolderName, StringComparison.OrdinalIgnoreCase))
+                _log.Info($"출력 폴더가 OneDrive 안이라, 중간 파일은 동기화되지 않게 {workRoot}에 둡니다.");
+        }
 
         int frames;
         var outerLog = _log;
@@ -167,7 +347,9 @@ public sealed class JobRunner(AppSettings settings, IToolRunner runner, IJobLog 
                 string cleaned = Path.Combine(work, "cleaned.mkv");
                 frames = await MakeCleanedAsync(request, info, regions, work, manifest, cleaned, cancellationToken).ConfigureAwait(false);
                 string upscaled = Path.Combine(work, "upscaled.mkv");
-                await UpscaleAsync(options, plan, manifest, work, cleaned, upscaled, frames, cancellationToken).ConfigureAwait(false);
+                // 중간 파일(cleaned.mkv)은 원본의 색 범위를 그대로 지닌다 (AddEncode의 -color_range).
+                bool fullRange = FfmpegCommands.SwsRange(info.ColorRange) == "pc";
+                await UpscaleAsync(options, plan, manifest, work, cleaned, upscaled, frames, fullRange, cancellationToken).ConfigureAwait(false);
                 await FinalizeAsync(request, info, plan, upscaled, partial, frames, cancellationToken).ConfigureAwait(false);
             }
 
@@ -179,10 +361,25 @@ public sealed class JobRunner(AppSettings settings, IToolRunner runner, IJobLog 
             fileLog.Dispose();
         }
 
-        // 성공했을 때만 여기로 온다: 중간 파일 정리.
+        // 성공했을 때만 여기로 온다: 중간 파일 정리. 이 작업의 폴더만 지우고, 그 위 폴더는 비었을 때만 지운다
+        // (사용자가 지정한 폴더에 다른 파일이 있으면 그대로 둔다).
         TryDeleteDirectory(work);
-        if (request.WorkDirectory is null) TryDeleteEmptyDirectory(Path.GetDirectoryName(work)!);
+        // 다른 드라이브로 돌려 둔 정션·링크(--work)는 비어도 남긴다 — 지우면 다음 작업은 원래 드라이브에 쓰게 된다.
+        if (!IsLink(workRoot)) TryDeleteEmptyDirectory(workRoot);
         return (frames, null);
+    }
+
+    /// <summary>정션·심볼릭 링크인지. 알 수 없으면 링크로 본다 (지우지 않는 쪽).</summary>
+    private static bool IsLink(string directory)
+    {
+        try
+        {
+            return new DirectoryInfo(directory).Attributes.HasFlag(FileAttributes.ReparsePoint);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return true;
+        }
     }
 
     /// <summary>업스케일러에 넣을 중간 영상(영상만, B프레임 없음)을 만든다. 이미 완성돼 있으면 건너뛴다.</summary>
@@ -211,7 +408,7 @@ public sealed class JobRunner(AppSettings settings, IToolRunner runner, IJobLog 
                 break;
             default:
                 long total = info.EstimateFrames(options.StartSeconds, options.DurationSeconds);
-                var args = FfmpegCommands.Prepare(info, options.StartSeconds, options.DurationSeconds, encode, temp);
+                var args = FfmpegCommands.Prepare(info, options.StartSeconds, options.DurationSeconds, encode, temp, options.ShouldDeinterlace(info));
                 await RunFfmpegAsync(args, frame => _progress.Report(JobStage.Prepare, Fraction(frame, total)), cancellationToken).ConfigureAwait(false);
                 break;
         }
@@ -242,13 +439,33 @@ public sealed class JobRunner(AppSettings settings, IToolRunner runner, IJobLog 
 
         long total = info.EstimateFrames(options.StartSeconds, options.DurationSeconds);
         long last = 0;
-        var args = FfmpegCommands.Delogo(info, boxes, options.StartSeconds, options.DurationSeconds, encode, target);
+        var args = FfmpegCommands.Delogo(info, boxes, options.StartSeconds, options.DurationSeconds, encode, target, options.ShouldDeinterlace(info));
         await RunFfmpegAsync(args, frame =>
         {
             last = frame;
             _progress.Report(stage, Fraction(frame, total));
         }, cancellationToken).ConfigureAwait(false);
         return (int)last;
+    }
+
+    private static readonly HashSet<string> ReservedNames = new(
+        ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$",
+         .. "123456789¹²³".SelectMany(n => new[] { $"COM{n}", $"LPT{n}" })], StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>파일 이름이 Windows의 장치 이름(확장자를 붙여도 장치로 열린다)인지.</summary>
+    internal static bool IsReservedName(string path)
+    {
+        string name = Path.GetFileName(path);
+        int dot = name.IndexOf('.');
+        return ReservedNames.Contains((dot < 0 ? name : name[..dot]).TrimEnd(' '));
+    }
+
+    /// <summary>드라이브 표기 뒤의 폴더·파일 이름 가운데 Windows가 받지 않는 글자가 든 것이 있는지.</summary>
+    internal static bool HasUnusableName(string fullPath)
+    {
+        char[] invalid = Path.GetInvalidFileNameChars();
+        string rest = fullPath[(Path.GetPathRoot(fullPath)?.Length ?? 0)..];
+        return rest.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar).Any(name => name.IndexOfAny(invalid) >= 0);
     }
 
     // ───────────────────────── ProPainter ─────────────────────────
@@ -259,9 +476,27 @@ public sealed class JobRunner(AppSettings settings, IToolRunner runner, IJobLog 
             throw new JobException("ProPainter용 파이썬 경로가 설정되지 않았습니다.");
         if (string.IsNullOrWhiteSpace(settings.ProPainterDir) || !File.Exists(Path.Combine(settings.ProPainterDir, ProPainterScript)))
             throw new JobException($"ProPainter 폴더가 올바르지 않습니다 ({ProPainterScript}가 없음): {settings.ProPainterDir}");
+        ValidateProPainterOptions(options);
+    }
+
+    /// <summary>
+    /// ProPainter 숫자 옵션을 확인한다. 아래 계획 함수들의 .NET 기본 메시지는 영어라 그대로 보이면 안 된다 — 명령줄 plan도 이것으로 확인한다.
+    /// </summary>
+    public static void ValidateProPainterOptions(JobOptions options)
+    {
+        if (options.SubvideoLength < 1)
+            throw new JobException($"ProPainter가 한 번에 볼 프레임 수(subvideo)는 1 이상이어야 합니다: {options.SubvideoLength}");
+        if (options.Region.Pad < 0)
+            throw new JobException($"박스 둘레 여백(pad)은 0 이상이어야 합니다: {options.Region.Pad}");
+        if (options.Region.MaxArea < 64)
+            throw new JobException($"처리 영역의 최대 넓이(max-area)는 64 이상이어야 합니다: {options.Region.MaxArea}");
+        if (options.ChunkLength < 2)
+            throw new JobException($"조각 길이(chunk)는 2 이상이어야 합니다: {options.ChunkLength}");
+        if (options.Overlap < 0)
+            throw new JobException($"조각 겹침(overlap)은 0 이상이어야 합니다: {options.Overlap}");
         try
         {
-            ChunkPlanner.Plan(1, options.ChunkLength, options.Overlap); // 옵션 검증
+            ChunkPlanner.Plan(1, options.ChunkLength, options.Overlap); // 겹침이 조각의 절반을 넘는지
         }
         catch (ArgumentException ex)
         {
@@ -294,7 +529,7 @@ public sealed class JobRunner(AppSettings settings, IToolRunner runner, IJobLog 
         _log.Info($"프레임 {frameCount}장, 조각 {chunks.Count}개 (조각 길이 {options.ChunkLength}, 겹침 {options.Overlap})");
 
         // 2) ProPainter (영역 × 조각)
-        string scratch = Path.Combine(settings.ProPainterDir, ProPainterScratch, manifest.JobKey[..10]);
+        string scratch = Path.Combine(settings.ProPainterDir, ProPainterScratch, ScratchName(work));
         try
         {
             int totalChunks = regions.Count * chunks.Count, doneChunks = 0;
@@ -332,11 +567,19 @@ public sealed class JobRunner(AppSettings settings, IToolRunner runner, IJobLog 
             var alpha = MaskBuilder.BuildAlpha(region, options.MaskDilation, region.ResizeRatio);
             var mergeProgress = new SynchronousProgress<int>(done =>
                 _progress.Report(JobStage.Merge, (index + (double)done / frameCount) / regions.Count));
-            await Task.Run(() => ChunkMerger.Merge(InpaintDir(work, index), chunks, OutDir(work, index),
-                region.Rect.Width, region.Rect.Height, alpha, mergeProgress, cancellationToken), cancellationToken).ConfigureAwait(false);
+            try
+            {
+                await Task.Run(() => ChunkMerger.Merge(InpaintDir(work, index), chunks, OutDir(work, index),
+                    region.Rect.Width, region.Rect.Height, alpha, mergeProgress, cancellationToken), cancellationToken).ConfigureAwait(false);
+            }
+            catch (JobException ex)
+            {
+                // "작업 폴더를 지우라"는 안내에 어느 폴더인지 붙인다 (앱에서는 작업 폴더가 보이지 않는다).
+                throw new JobException($"{ex.Message} (작업 폴더: {work})", ex);
+            }
 
             if (CountPng(OutDir(work, i)) != frameCount)
-                throw new JobException("병합된 프레임 수가 맞지 않습니다. 작업 폴더를 지우고 다시 시도하세요.");
+                throw new JobException($"병합된 프레임 수가 맞지 않습니다. 작업 폴더를 지우고 다시 시도하세요: {work}");
             manifest.MergedRegions.Add(i);
             manifest.Save(work);
             // 병합이 끝난 영역의 원본·복원 프레임은 더 필요 없다.
@@ -346,7 +589,7 @@ public sealed class JobRunner(AppSettings settings, IToolRunner runner, IJobLog 
 
         // 4) 원본 위에 얹어 인코딩
         var overlays = regions.Select((r, i) => (r.Rect, OutDir(work, i))).ToList();
-        var args = FfmpegCommands.Composite(info, overlays, options.StartSeconds, options.DurationSeconds, encode, target);
+        var args = FfmpegCommands.Composite(info, overlays, options.StartSeconds, options.DurationSeconds, encode, target, options.ShouldDeinterlace(info));
         await RunFfmpegAsync(args, frame => _progress.Report(JobStage.Composite, Fraction(frame, frameCount)), cancellationToken).ConfigureAwait(false);
         return frameCount;
     }
@@ -374,7 +617,7 @@ public sealed class JobRunner(AppSettings settings, IToolRunner runner, IJobLog 
         }
 
         var targets = regions.Select((r, i) => (r.Rect, SrcDir(work, i))).ToList();
-        var args = FfmpegCommands.ExtractRegions(info, targets, request.Options.StartSeconds, request.Options.DurationSeconds);
+        var args = FfmpegCommands.ExtractRegions(info, targets, request.Options.StartSeconds, request.Options.DurationSeconds, request.Options.ShouldDeinterlace(info));
         await RunFfmpegAsync(args, frame => _progress.Report(JobStage.Extract, Fraction(frame, estimatedFrames)), cancellationToken).ConfigureAwait(false);
 
         int count = CountPng(SrcDir(work, 0));
@@ -482,11 +725,12 @@ public sealed class JobRunner(AppSettings settings, IToolRunner runner, IJobLog 
 
     // ───────────────────────── 업스케일 ─────────────────────────
 
-    private async Task UpscaleAsync(JobOptions options, UpscalePlan plan, JobManifest manifest, string work, string cleaned, string upscaled, int frames, CancellationToken cancellationToken)
+    private async Task UpscaleAsync(JobOptions options, UpscalePlan plan, JobManifest manifest, string work, string cleaned, string upscaled, int frames, bool fullRange, CancellationToken cancellationToken)
     {
-        // 뒤에 줄이는 단계가 있으면 여기 결과는 중간물이므로 화질을 높게 잡는다.
-        var encode = plan.NeedsDownscale ? new EncodeOptions(EncodeOptions.IntermediateCrf, options.Preset) : new EncodeOptions(options.Crf, options.Preset);
-        string upscaleKey = string.Create(CultureInfo.InvariantCulture, $"{plan.Processor}|{plan.Model}|{plan.ModelScale}|{encode.Crf}|{encode.Preset}");
+        // 뒤에 줄이거나 선명도를 거는 단계가 있으면 여기 결과는 중간물이므로 화질을 높게 잡는다.
+        var encode = ReencodesAtFinalize(plan, options) ? new EncodeOptions(EncodeOptions.IntermediateCrf, options.Preset) : new EncodeOptions(options.Crf, options.Preset);
+        // 화소 형식도 넣는다 — 범위를 잘못 다루던 때 만든 결과를 이어 하기에서 그대로 쓰지 않게.
+        string upscaleKey = string.Create(CultureInfo.InvariantCulture, $"{plan.Processor}|{plan.Model}|{plan.ModelScale}|{encode.Crf}|{encode.Preset}|{Video2X.PixelFormat(fullRange)}");
         if (manifest.UpscaledKey == upscaleKey && File.Exists(upscaled))
         {
             _log.Info("업스케일: 이미 끝나 있어 건너뜁니다.");
@@ -499,31 +743,13 @@ public sealed class JobRunner(AppSettings settings, IToolRunner runner, IJobLog 
         string temp = PartialPath(upscaled);
         TryDeleteFile(temp);
 
-        var invocation = new ToolInvocation(settings.Video2X, Video2X.Arguments(plan, cleaned, temp, options.GpuIndex, encode));
         _log.Info($"업스케일: {plan.Model} {plan.ModelScale}배, {frames}장");
-        _log.Detail("> " + invocation.DisplayText);
         _progress.Report(JobStage.Upscale, 0);
-
-        bool finished = false;
         var clock = Stopwatch.StartNew();
-        var result = await runner.RunAsync(invocation, line =>
-        {
-            if (Video2X.TryParseProgress(line, out long frame))
-            {
-                _progress.Report(JobStage.Upscale, Fraction(frame, frames),
-                    frame > 0 ? string.Create(CultureInfo.InvariantCulture, $"{frame}/{frames}장, 초당 {frame / Math.Max(clock.Elapsed.TotalSeconds, 0.001):0.0}장") : null);
-                return;
-            }
-            if (line.Contains(Video2X.DoneMarker, StringComparison.Ordinal)) finished = true;
-            if (!string.IsNullOrWhiteSpace(line)) _log.Detail(Video2X.StripAnsi(line));
-        }, line => _log.Detail(line), cancellationToken).ConfigureAwait(false);
-
-        // Video2X 6.4.0은 정상적으로 끝낸 뒤에도 종료 과정에서 죽어 0이 아닌 코드를 내는 일이 있다(실측).
-        // 그래서 종료 코드가 아니라 "완료 문구 + 결과 프레임 수"로 성공을 판단한다.
-        if (result.ExitCode != 0 && !finished)
-            throw new ToolFailedException($"Video2X가 오류 코드 {result.ExitCode}로 끝났습니다.{Environment.NewLine}{result.ErrorTail}", result.ExitCode);
-        if (result.ExitCode != 0)
-            _log.Detail($"Video2X가 작업을 마친 뒤 종료 코드 {result.ExitCode}를 냈습니다. 결과 파일을 검사합니다.");
+        if (plan.UsesPython)
+            await RunRealBasicVsrAsync(options, cleaned, temp, frames, encode, clock, cancellationToken).ConfigureAwait(false);
+        else
+            await RunVideo2XAsync(plan, options, cleaned, temp, frames, encode, fullRange, clock, cancellationToken).ConfigureAwait(false);
 
         int produced = File.Exists(temp) ? await CountFramesAsync(temp, cancellationToken).ConfigureAwait(false) : 0;
         if (produced != frames)
@@ -535,15 +761,84 @@ public sealed class JobRunner(AppSettings settings, IToolRunner runner, IJobLog 
         _log.Info(string.Create(CultureInfo.InvariantCulture, $"업스케일 끝: {frames}장, {clock.Elapsed.TotalSeconds:0}초 (초당 {frames / Math.Max(clock.Elapsed.TotalSeconds, 0.001):0.0}장)"));
     }
 
+    private async Task RunVideo2XAsync(UpscalePlan plan, JobOptions options, string cleaned, string temp, int frames, EncodeOptions encode, bool fullRange, Stopwatch clock, CancellationToken cancellationToken)
+    {
+        var invocation = new ToolInvocation(settings.Video2X, Video2X.Arguments(plan, cleaned, temp, options.GpuIndex, encode, fullRange));
+        _log.Detail("> " + invocation.DisplayText);
+
+        bool finished = false;
+        int[] pixelFormatWarnings = [0]; // 출력·오류 두 줄기가 따로 부르므로 Interlocked로 센다
+        // 전체 범위(0~255) 영상이면 Video2X 안의 swscaler가 프레임마다 "deprecated pixel format used" 경고를 낸다 —
+        // 두 시간짜리 영상이면 job.log가 수십 MB가 되므로 처음 한 번만 남긴다.
+        void Detail(string line)
+        {
+            if (line.Contains("deprecated pixel format used", StringComparison.Ordinal) && Interlocked.Increment(ref pixelFormatWarnings[0]) > 1) return;
+            _log.Detail(line);
+        }
+        var result = await runner.RunAsync(invocation, line =>
+        {
+            if (Video2X.TryParseProgress(line, out long frame))
+            {
+                ReportUpscaleFrame(frame, frames, clock);
+                return;
+            }
+            if (line.Contains(Video2X.DoneMarker, StringComparison.Ordinal)) finished = true;
+            if (!string.IsNullOrWhiteSpace(line)) Detail(Video2X.StripAnsi(line));
+        }, Detail, cancellationToken).ConfigureAwait(false);
+
+        // Video2X 6.4.0은 정상적으로 끝낸 뒤에도 종료 과정에서 죽어 0이 아닌 코드를 내는 일이 있다(실측).
+        // 그래서 종료 코드가 아니라 "완료 문구 + 결과 프레임 수"로 성공을 판단한다.
+        if (result.ExitCode != 0 && !finished)
+            throw new ToolFailedException($"Video2X가 오류 코드 {result.ExitCode}로 끝났습니다.{Environment.NewLine}{result.ErrorTail}", result.ExitCode);
+        if (result.ExitCode != 0)
+            _log.Detail($"Video2X가 작업을 마친 뒤 종료 코드 {result.ExitCode}를 냈습니다. 결과 파일을 검사합니다.");
+    }
+
+    private static readonly HttpClient Http = new();
+
+    /// <summary>RealBasicVSR: 모델 가중치를 확인(없으면 내려받기)하고 파이썬 스크립트로 돌린다. 입력 크기는 중간 영상(cleaned)의 크기 = 원본 크기.</summary>
+    private async Task RunRealBasicVsrAsync(JobOptions options, string cleaned, string temp, int frames, EncodeOptions encode, Stopwatch clock, CancellationToken cancellationToken)
+    {
+        await RealBasicVsr.EnsureWeightsAsync(Http, (done, total) =>
+            _progress.Report(JobStage.Upscale, 0, total > 0
+                ? string.Create(CultureInfo.InvariantCulture, $"모델 내려받는 중 {done / 1048576.0:0}/{total / 1048576.0:0} MB")
+                : "모델 내려받는 중"), _log.Info, cancellationToken).ConfigureAwait(false);
+
+        var cleanedInfo = await ProbeAsync(cleaned, cancellationToken).ConfigureAwait(false);
+        var invocation = new ToolInvocation(settings.Python,
+            RealBasicVsr.Arguments(settings.Ffmpeg, cleaned, temp, cleanedInfo.Width, cleanedInfo.Height, frames, cleanedInfo.Fps, encode,
+                cleanedInfo.ColorSpace, cleanedInfo.ColorRange))
+        {
+            Environment = Runtime.ProPainterSetup.PythonEnvironment,
+        };
+        _log.Detail("> " + invocation.DisplayText);
+        var result = await runner.RunAsync(invocation, line =>
+        {
+            if (RealBasicVsr.TryParseProgress(line, out long frame)) { ReportUpscaleFrame(frame, frames, clock); return; }
+            if (line.StartsWith("warning:", StringComparison.Ordinal)) _log.Warning(line["warning:".Length..].Trim());
+            else if (!string.IsNullOrWhiteSpace(line)) _log.Detail(line);
+        }, line => _log.Detail(line), cancellationToken).ConfigureAwait(false);
+        if (result.ExitCode != 0)
+            throw new ToolFailedException($"RealBasicVSR가 오류 코드 {result.ExitCode}로 끝났습니다.{Environment.NewLine}{result.ErrorTail}", result.ExitCode);
+    }
+
+    private void ReportUpscaleFrame(long frame, int frames, Stopwatch clock) =>
+        _progress.Report(JobStage.Upscale, Fraction(frame, frames),
+            frame > 0 ? string.Create(CultureInfo.InvariantCulture, $"{frame}/{frames}장, 초당 {frame / Math.Max(clock.Elapsed.TotalSeconds, 0.001):0.0}장") : null);
+
     private async Task FinalizeAsync(JobRequest request, MediaInfo info, UpscalePlan plan, string upscaled, string partial, int frames, CancellationToken cancellationToken)
     {
         var options = request.Options;
         (int Width, int Height)? scaleTo = plan.NeedsDownscale ? (info.Width * plan.FinalScale, info.Height * plan.FinalScale) : null;
         int outputHeight = info.Height * plan.FinalScale;
+        if (options.Sharpen > 0) _log.Info($"선명도 {options.Sharpen} 적용 ({FfmpegCommands.SharpenFilter(options.Sharpen)})");
         var args = FfmpegCommands.Finalize(info, upscaled, scaleTo, outputHeight, options.StartSeconds, options.DurationSeconds,
-            new EncodeOptions(options.Crf, options.Preset), partial);
+            new EncodeOptions(options.Crf, options.Preset), partial, options.Sharpen);
         await RunFfmpegAsync(args, frame => _progress.Report(JobStage.Finalize, Fraction(frame, frames)), cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>마지막 단계에서 영상을 다시 인코딩하는지 (줄이기 또는 선명도). 아니면 업스케일 결과를 그대로 옮긴다.</summary>
+    private static bool ReencodesAtFinalize(UpscalePlan plan, JobOptions options) => plan.NeedsDownscale || options.Sharpen > 0;
 
     // ───────────────────────── 공통 ─────────────────────────
 
@@ -581,7 +876,7 @@ public sealed class JobRunner(AppSettings settings, IToolRunner runner, IJobLog 
             _log.Info(string.Create(CultureInfo.InvariantCulture, $"임시 공간: 약 {Gb(needed):0.0} GB 필요, {drive.Name} 남은 공간 {Gb(free):0.0} GB"));
             if (free < needed)
                 throw new JobException(string.Create(CultureInfo.InvariantCulture,
-                    $"임시 공간이 부족합니다. 약 {Gb(needed):0.0} GB가 필요한데 {drive.Name}에 {Gb(free):0.0} GB만 남았습니다. 작업 폴더를 다른 드라이브로 지정하거나 구간을 줄이세요."));
+                    $"임시 공간이 부족합니다. 약 {Gb(needed):0.0} GB가 필요한데 {drive.Name}에 {Gb(free):0.0} GB만 남았습니다. 공간을 비우거나, 출력 파일을 여유가 있는 드라이브에 지정하거나(작업 폴더는 출력 폴더 안에 생긴다, 명령줄은 --work), 처리 구간을 줄이세요."));
         }
         catch (ArgumentException)
         {
@@ -595,15 +890,45 @@ public sealed class JobRunner(AppSettings settings, IToolRunner runner, IJobLog 
     public static long EstimateTempBytes(IReadOnlyList<ProcessRegion> regions, long frames) =>
         regions.Sum(r => r.Rect.Area) * frames * 4;
 
-    public static string DefaultWorkDirectory(string outputPath, string inputPath, string jobKey)
+    /// <summary>
+    /// 이 작업의 중간 파일 폴더: &lt;뿌리&gt;\&lt;입력 이름&gt;-&lt;작업 키&gt;. 뿌리는 기본이 출력 폴더의 <c>.nekovup</c>이고,
+    /// 사용자가 폴더를 지정했으면(<see cref="JobRequest.WorkDirectory"/>) 그 폴더다. 지정한 폴더를 통째로 쓰지 않고 그 안에 작업별 폴더를 만드는 것은,
+    /// 작업이 끝나면 중간 폴더를 지우기 때문이다 — 이미 다른 파일이 있는 폴더를 지정해도 그 파일은 건드리지 않는다.
+    /// </summary>
+    public static string JobWorkDirectory(JobRequest request, string jobKey) =>
+        JobWorkDirectory(request, jobKey, SyncFolders.Roots, WorkFolders.FallbackRoot);
+
+    /// <summary>
+    /// 작업 폴더: 지정한 곳(--work), 아니면 출력 폴더 옆 <c>.nekovup</c>. 출력 폴더가 OneDrive 안이면 중간 PNG 수십 GB가
+    /// 동기화되지 않게 밖(<paramref name="fallbackRoot"/>, 보통 <c>X:\NekoVup-work</c>)에 둔다 (사용자 결정, 2026-11-10).
+    /// </summary>
+    internal static string JobWorkDirectory(JobRequest request, string jobKey, IReadOnlyList<string> syncRoots, Func<string, string> fallbackRoot)
     {
-        string stem = Path.GetFileNameWithoutExtension(inputPath);
-        if (stem.Length > 40) stem = stem[..40];
-        return Path.Combine(Path.GetDirectoryName(Path.GetFullPath(outputPath))!, ".nekovup", $"{stem.Trim()}-{jobKey[..10]}");
+        string stem = Path.GetFileNameWithoutExtension(request.InputPath);
+        // 긴 이름은 자른다. 글자 하나가 두 칸을 쓰는 경우(이모지 등) 그 가운데를 자르면 만들 수 없는 폴더 이름이 된다.
+        if (stem.Length > 40) stem = stem[..(char.IsHighSurrogate(stem[39]) ? 39 : 40)];
+        string name = $"{stem.Trim()}-{jobKey[..10]}";
+        string outputFolder = Path.GetDirectoryName(Path.GetFullPath(request.OutputPath))!;
+        string root = request.WorkDirectory is { Length: > 0 } custom ? Path.GetFullPath(custom)
+            : SyncFolders.Contains(outputFolder, syncRoots) ? fallbackRoot(name)
+            : Path.Combine(outputFolder, WorkFolders.FolderName);
+        return Path.Combine(root, name);
     }
 
+    /// <summary>
+    /// ProPainter 폴더 안 임시 폴더의 이름 (영문·숫자만). 작업 폴더마다 다르다 — 작업 키만으로 지으면,
+    /// 같은 입력·옵션을 다른 출력 폴더로 동시에 돌릴 때 두 작업이 서로의 파일을 지운다.
+    /// </summary>
+    public static string ScratchName(string workDirectory) =>
+        Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(Path.GetFullPath(workDirectory).ToUpperInvariant())))[..12];
+
+    /// <summary>10비트 이상 픽셀 형식인지 (yuv420p10le, p010le 등).</summary>
+    public static bool IsHighBitDepth(string? pixelFormat) =>
+        pixelFormat is not null && (System.Text.RegularExpressions.Regex.IsMatch(pixelFormat, @"p(9|1[0246])(le|be)?$") || pixelFormat.StartsWith("p01", StringComparison.Ordinal));
+
     /// <summary>작업 종류에 따른 단계 목록과, 전체 진행률에서 각 단계가 차지하는 비중(대략의 소요 시간 비).</summary>
-    private static List<(JobStage Stage, double Weight)> StagePlan(CleanMode mode, UpscalePlan? plan)
+    private static List<(JobStage Stage, double Weight)> StagePlan(CleanMode mode, UpscalePlan? plan, bool reencodesAtFinalize)
     {
         var stages = new List<(JobStage, double)>();
         switch (mode)
@@ -622,7 +947,7 @@ public sealed class JobRunner(AppSettings settings, IToolRunner runner, IJobLog 
         {
             // 배율이 클수록 오래 걸린다 (출력 픽셀 수에 비례).
             stages.Add((JobStage.Upscale, 60.0 * plan.ModelScale * plan.ModelScale / 4));
-            stages.Add((JobStage.Finalize, plan.NeedsDownscale ? 25 : 2));
+            stages.Add((JobStage.Finalize, reencodesAtFinalize ? 25 : 2));
         }
         return stages;
     }

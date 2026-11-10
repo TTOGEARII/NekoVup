@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Globalization;
+using System.Runtime.ExceptionServices;
 using NekoVup.Core.Chunks;
 using NekoVup.Core.Imaging;
 
@@ -43,20 +44,32 @@ public static class ChunkMerger
         int done = 0;
         var gate = new Lock();
         var options = new ParallelOptions { CancellationToken = cancellationToken, MaxDegreeOfParallelism = Math.Max(1, Environment.ProcessorCount - 1) };
-        Parallel.For(0, frameCount, options, frame =>
+        try
         {
-            string target = Path.Combine(outputDir, SequenceFrameName(frame));
-            // 완성된 파일만 최종 이름을 가지므로(임시 이름으로 쓴 뒤 바꿈) 이미 있으면 건너뛰어도 안전하다.
-            if (!File.Exists(target))
+            Parallel.For(0, frameCount, options, frame =>
             {
-                MergeFrame(inpaintRoot, chunks, frame, regionWidth, regionHeight, alpha, keep, target);
-            }
-            // 여러 스레드가 동시에 끝내므로, 세는 것과 알리는 것을 한데 묶어야 진행률이 뒤로 가지 않는다.
-            if (progress is not null)
-            {
-                lock (gate) progress.Report(++done);
-            }
-        });
+                string target = Path.Combine(outputDir, SequenceFrameName(frame));
+                // 완성된 파일만 최종 이름을 가지므로(임시 이름으로 쓴 뒤 바꿈) 이미 있으면 건너뛰어도 안전하다.
+                if (!File.Exists(target))
+                {
+                    MergeFrame(inpaintRoot, chunks, frame, regionWidth, regionHeight, alpha, keep, target);
+                }
+                // 여러 스레드가 동시에 끝내므로, 세는 것과 알리는 것을 한데 묶어야 진행률이 뒤로 가지 않는다.
+                if (progress is not null)
+                {
+                    lock (gate) progress.Report(++done);
+                }
+            });
+        }
+        catch (AggregateException ex)
+        {
+            // 병렬 처리 중에 난 오류는 한 묶음(AggregateException)으로 온다. 부르는 쪽이 다룰 수 있는 오류 하나로 풀어 준다.
+            var first = ex.Flatten().InnerExceptions[0];
+            if (first is OperationCanceledException or IOException or UnauthorizedAccessException)
+                ExceptionDispatchInfo.Capture(first).Throw();
+            // 깨진 PNG, 지원하지 않는 형식 등: 복원 도구가 내놓은 프레임이 잘못됐다.
+            throw new JobException("복원된 프레임을 합치지 못했습니다: " + first.Message + " 작업 폴더를 지우고 다시 시도하세요.", first);
+        }
     }
 
     private static void MergeFrame(

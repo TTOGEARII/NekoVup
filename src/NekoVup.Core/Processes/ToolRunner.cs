@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Runtime.ExceptionServices;
 using System.Text;
 using Windows.Win32;
 using Windows.Win32.System.Diagnostics.Debug;
@@ -85,8 +86,9 @@ public sealed class ToolRunner : IToolRunner
         {
             process.Start();
         }
-        catch (Win32Exception ex)
+        catch (Exception ex) when (ex is Win32Exception or InvalidOperationException)
         {
+            // 파일이 없으면 Win32Exception, 경로가 비어 있으면(설정에 "ffprobe": "") InvalidOperationException이다.
             throw new ToolFailedException($"'{invocation.FileName}'을(를) 실행할 수 없습니다: {ex.Message}", null, ex);
         }
 
@@ -95,17 +97,22 @@ public sealed class ToolRunner : IToolRunner
         try { process.StandardInput.Close(); } catch (IOException) { }
 
         var tail = new Queue<string>(ErrorTailLines);
-        var pumps = Task.WhenAll(PumpAsync(process.StandardOutput, onOutput, null), PumpAsync(process.StandardError, onError, tail));
+        // 출력 콜백이 예외를 던지면(디스크가 가득 차 로그를 못 쓸 때 등) 도구를 바로 멈추고 그 예외를 그대로 알린다.
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var failure = new SinkFailure(stop);
+        var pumps = Task.WhenAll(PumpAsync(process.StandardOutput, onOutput, null, failure), PumpAsync(process.StandardError, onError, tail, failure));
 
         try
         {
-            await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+            await process.WaitForExitAsync(stop.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
             job?.Terminate();
             Kill(process);
             await DrainAsync(pumps).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            failure.ThrowIfAny();
             throw;
         }
 
@@ -115,6 +122,7 @@ public sealed class ToolRunner : IToolRunner
             job?.Terminate();
             await DrainAsync(pumps).ConfigureAwait(false);
         }
+        failure.ThrowIfAny();
 
         string errorTail;
         lock (tail) errorTail = string.Join(Environment.NewLine, tail);
@@ -146,7 +154,7 @@ public sealed class ToolRunner : IToolRunner
         {
             process.Start();
         }
-        catch (Win32Exception ex)
+        catch (Exception ex) when (ex is Win32Exception or InvalidOperationException)
         {
             throw new ToolFailedException($"'{invocation.FileName}'을(를) 실행할 수 없습니다: {ex.Message}", null, ex);
         }
@@ -193,7 +201,7 @@ public sealed class ToolRunner : IToolRunner
         }
     }
 
-    private static async Task PumpAsync(StreamReader reader, Action<string>? sink, Queue<string>? tail)
+    private static async Task PumpAsync(StreamReader reader, Action<string>? sink, Queue<string>? tail, SinkFailure? failure = null)
     {
         try
         {
@@ -207,11 +215,38 @@ public sealed class ToolRunner : IToolRunner
                         tail.Enqueue(line);
                     }
                 }
-                sink?.Invoke(line);
+
+                // 콜백이 실패한 뒤에도 끝까지 읽어서 버린다. 읽기를 그만두면 도구가 가득 찬 파이프에 막혀 영영 끝나지 않는다.
+                if (sink is null || failure is { Occurred: true }) continue;
+                try
+                {
+                    sink(line);
+                }
+                catch (Exception ex) when (failure is not null)
+                {
+                    failure.Set(ex);
+                }
             }
         }
         catch (IOException) { }
         catch (ObjectDisposedException) { }
+    }
+
+    /// <summary>출력 콜백이 던진 첫 예외를 맡아 두고, 도구를 멈추라고 알린다.</summary>
+    private sealed class SinkFailure(CancellationTokenSource stop)
+    {
+        private ExceptionDispatchInfo? _first;
+
+        public bool Occurred => Volatile.Read(ref _first) is not null;
+
+        public void Set(Exception exception)
+        {
+            if (Interlocked.CompareExchange(ref _first, ExceptionDispatchInfo.Capture(exception), null) is not null) return;
+            try { stop.Cancel(); }
+            catch (ObjectDisposedException) { } // 실행이 이미 끝났다
+        }
+
+        public void ThrowIfAny() => Volatile.Read(ref _first)?.Throw();
     }
 
     private static void Kill(Process process)

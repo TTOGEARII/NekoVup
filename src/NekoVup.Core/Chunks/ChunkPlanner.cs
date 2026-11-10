@@ -15,7 +15,7 @@ public static class ChunkPlanner
         ArgumentOutOfRangeException.ThrowIfLessThan(frameCount, 1);
         ArgumentOutOfRangeException.ThrowIfLessThan(chunkLength, 2);
         ArgumentOutOfRangeException.ThrowIfNegative(overlap);
-        if (overlap * 2 > chunkLength)
+        if ((long)overlap * 2 > chunkLength)
             throw new ArgumentException($"겹침({overlap})은 조각 길이({chunkLength})의 절반 이하여야 합니다.");
 
         var chunks = new List<ChunkRange>();

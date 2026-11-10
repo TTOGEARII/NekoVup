@@ -31,6 +31,21 @@ public enum UpscalePreset
 
     /// <summary>실사용 (RealESRGAN realesrgan-plus, 4배 모델이라 2·3배는 4배 후 줄인다).</summary>
     Real,
+
+    /// <summary>
+    /// 옛 비디오(캠코더·VHS·DVD 녹화)용: RealBasicVSR — 앞뒤 프레임을 함께 보는 영상 전용 복원 모델 (4배, PyTorch로 실행).
+    /// 사진용 RealESRGAN보다 옛 영상의 노이즈·번짐에 맞다. ProPainter 파이썬 환경이 필요하다.
+    /// </summary>
+    OldVideo,
+}
+
+/// <summary>인터레이스(빗살 무늬) 해제. 옛 캠코더·DVD·방송 녹화는 거의 인터레이스라, 그대로 키우면 빗살까지 커진다.</summary>
+public enum Deinterlace
+{
+    /// <summary>파일에 인터레이스 표기가 있을 때만 (ffprobe field_order).</summary>
+    Auto,
+    Always,
+    Never,
 }
 
 public enum JobStage
@@ -85,6 +100,23 @@ public sealed record JobOptions
 
     /// <summary>Video2X가 쓸 GPU 번호 (video2x -l 로 확인).</summary>
     public int GpuIndex { get; init; }
+
+    /// <summary>
+    /// 업스케일 뒤에 거는 선명도 (0~100, 0이면 안 건다). 업스케일 모델은 노이즈와 깨짐을 지우면서 경계를 부드럽게 만드는 쪽이라
+    /// "깨끗해졌지만 흐릿하다"고 느껴질 때 쓴다. 마지막 단계에서 한 번 더 인코딩한다.
+    /// </summary>
+    public int Sharpen { get; init; }
+
+    /// <summary>인터레이스 해제 (기본: 파일 표기를 따름). 원본을 읽는 모든 단계(추출·합성·delogo·업스케일 준비)에 똑같이 적용된다.</summary>
+    public Deinterlace Deinterlace { get; init; } = Deinterlace.Auto;
+
+    /// <summary>이 입력에 인터레이스 해제를 걸지.</summary>
+    public bool ShouldDeinterlace(Media.MediaInfo info) => Deinterlace switch
+    {
+        Deinterlace.Always => true,
+        Deinterlace.Never => false,
+        _ => info.IsInterlaced,
+    };
 }
 
 public sealed record JobRequest
@@ -176,7 +208,7 @@ public sealed class JobManifest
         var o = request.Options;
         var text = new StringBuilder();
         text.Append(CultureInfo.InvariantCulture, $"{file.FullName.ToUpperInvariant()}|{(file.Exists ? file.Length : 0)}|{(file.Exists ? file.LastWriteTimeUtc.Ticks : 0)}");
-        text.Append(CultureInfo.InvariantCulture, $"|{o.Mode}|{o.StartSeconds ?? 0:R}|{o.DurationSeconds ?? 0:R}");
+        text.Append(CultureInfo.InvariantCulture, $"|{o.Mode}|{o.StartSeconds ?? 0:R}|{o.DurationSeconds ?? 0:R}|{o.Deinterlace}");
         text.Append(CultureInfo.InvariantCulture, $"|{o.Region.Pad}|{o.Region.MaxArea}|{o.Region.MaskGrow}");
         text.Append(CultureInfo.InvariantCulture, $"|{o.ChunkLength}|{o.Overlap}|{o.SubvideoLength}|{o.MaskDilation}|{o.Fp16}");
         foreach (var box in request.Boxes) text.Append('|').Append(box.ToString());

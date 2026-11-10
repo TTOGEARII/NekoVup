@@ -75,16 +75,15 @@ $writer.Close()
 
 if ($Preview) { [IO.File]::WriteAllBytes($Preview, $pngs[0]); "preview: $Preview" }
 
-# ── 설치 화면: 종이 흰색 + 먹선 테두리 + 네 귀 재단선 ──
+# ── 설치 화면: 프로그램과 같은 짙은 회색 바탕 + 아래쪽 파란 강조선 ──
+# 아래 54픽셀은 설치 프로그램이 진행 막대를 그리는 자리라 비워 둔다.
 $splashXaml = @"
-<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" Width="480" Height="300" Background="White">
-  <Border BorderBrush="#111111" BorderThickness="3" Margin="14"/>
-  <Path Stroke="#111111" StrokeThickness="2" Data="M 4,22 L 4,4 L 22,4 M 458,4 L 476,4 L 476,22 M 476,278 L 476,296 L 458,296 M 22,296 L 4,296 L 4,278"/>
-  <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" Margin="0,0,0,34">
-    <Viewbox Width="118" Height="118">$cat</Viewbox>
-    <Border Background="#111111" Padding="12,4" Margin="0,14,0,0" HorizontalAlignment="Center">
-      <TextBlock Text="NekoVup" Foreground="White" FontFamily="Segoe UI" FontWeight="Bold" FontSize="22"/>
-    </Border>
+<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" Width="480" Height="300" Background="#17181B">
+  <Border BorderBrush="#3A3C43" BorderThickness="1"/>
+  <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" Margin="0,0,0,40">
+    <Viewbox Width="104" Height="104">$cat</Viewbox>
+    <TextBlock Text="NekoVup" Foreground="#E8E8EA" FontFamily="Segoe UI" FontWeight="SemiBold" FontSize="24" Margin="0,14,0,0" HorizontalAlignment="Center"/>
+    <Rectangle Width="44" Height="3" Fill="#5B9DFF" Margin="0,10,0,0"/>
   </StackPanel>
 </Grid>
 "@

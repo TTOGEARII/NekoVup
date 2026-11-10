@@ -189,6 +189,9 @@ public class ChunkPlannerTests
     {
         Assert.Throws<ArgumentOutOfRangeException>(() => ChunkPlanner.Plan(0));
         Assert.Throws<ArgumentException>(() => ChunkPlanner.Plan(100, chunkLength: 10, overlap: 6));
+        // 겹침 × 2가 int 범위를 넘어도 검사를 빠져나가지 못한다 (넘치면 음수가 되어 통과하고, 조각 나누기가 끝나지 않는다)
+        Assert.Throws<ArgumentException>(() => ChunkPlanner.Plan(100, chunkLength: 100, overlap: int.MaxValue));
+        Assert.Throws<ArgumentException>(() => ChunkPlanner.Plan(100, chunkLength: int.MaxValue, overlap: int.MaxValue));
     }
 }
 

@@ -13,6 +13,9 @@ public sealed record UpscalePlan(string Processor, string ModelOption, string Mo
 {
     /// <summary>모델 배율과 원하는 배율이 달라 업스케일 뒤에 ffmpeg로 줄여야 하는지.</summary>
     public bool NeedsDownscale => FinalScale != ModelScale;
+
+    /// <summary>Video2X가 아니라 우리 파이썬 스크립트(RealBasicVSR)로 돌리는 계획인지.</summary>
+    public bool UsesPython => Processor == RealBasicVsr.Processor;
 }
 
 /// <summary>Video2X 6.4.0 명령줄 조립과 출력 해석. 옵션은 실제 실행 파일의 --help와 출력으로 확인한 것이다.</summary>
@@ -30,6 +33,8 @@ public static class Video2X
             UpscalePreset.AnimeHq => new UpscalePlan("realcugan", "--realcugan-model", "models-se", scale, scale),
             // realesrgan-plus는 4배 모델만 있다.
             UpscalePreset.Real => new UpscalePlan("realesrgan", "--realesrgan-model", "realesrgan-plus", 4, scale),
+            // RealBasicVSR도 4배 모델뿐이다.
+            UpscalePreset.OldVideo => new UpscalePlan(RealBasicVsr.Processor, "", RealBasicVsr.ModelName, 4, scale),
             _ => throw new ArgumentException("업스케일 방식을 고르세요."),
         };
     }
@@ -38,17 +43,25 @@ public static class Video2X
     /// 영상만 처리한다(<c>--no-copy-streams</c>). 오디오·자막은 마지막 단계에서 ffmpeg로 붙인다.
     /// GPU 번호 옵션은 <c>-d</c>다 (문서 일부에 적힌 -g가 아니다).
     /// </summary>
-    public static List<string> Arguments(UpscalePlan plan, string inputPath, string outputPath, int gpuIndex, EncodeOptions encode) =>
+    /// <param name="fullRange">입력이 전체 범위(0~255) 영상인지 (웹캠·MJPEG 카메라·일부 휴대폰 녹화).</param>
+    public static List<string> Arguments(UpscalePlan plan, string inputPath, string outputPath, int gpuIndex, EncodeOptions encode, bool fullRange = false) =>
     [
         "-i", inputPath, "-o", outputPath,
         "-p", plan.Processor, plan.ModelOption, plan.Model,
         "-s", plan.ModelScale.ToString(CultureInfo.InvariantCulture),
         "-d", gpuIndex.ToString(CultureInfo.InvariantCulture),
-        "-c", "libx264", "--pix-fmt", "yuv420p",
+        "-c", "libx264", "--pix-fmt", PixelFormat(fullRange),
         "-e", "crf=" + encode.Crf.ToString(CultureInfo.InvariantCulture),
         "-e", "preset=" + encode.Preset,
         "--no-copy-streams",
     ];
+
+    /// <summary>
+    /// Video2X가 내보낼 화소 형식. Video2X는 출력 범위를 고르는 옵션이 없어, yuv420p로 내보내면 늘 제한 범위(16~235)로 쓰면서
+    /// 표기는 입력의 전체 범위를 그대로 붙인다 — 재생기는 전체 범위로 읽어 검은색이 뜨고 흰색이 어두워진다.
+    /// 전체 범위 입력은 yuvj420p로 받아야 값과 표기가 맞는다 (Video2X 6.4.0에서 확인).
+    /// </summary>
+    public static string PixelFormat(bool fullRange) => fullRange ? "yuvj420p" : "yuv420p";
 
     /// <summary>
     /// 진행 줄 <c>frame=37/184 (20.11%); fps=14.00; elapsed=00:00:05; remaining=00:00:10</c>에서 처리한 프레임 수를 읽는다.

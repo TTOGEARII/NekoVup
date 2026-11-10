@@ -36,6 +36,15 @@ public sealed record MediaInfo
     public string? ColorPrimaries { get; init; }
     public string? ColorTransfer { get; init; }
 
+    /// <summary>ffprobe의 field_order: progressive, tt, bb, tb, bt. 모르면 null.</summary>
+    public string? FieldOrder { get; init; }
+
+    /// <summary>인터레이스 영상인지 (옛 캠코더·DVD·방송 녹화). 표기가 없으면 false — 그런 파일은 사용자가 "항상 해제"를 고르면 된다.</summary>
+    public bool IsInterlaced => FieldOrder is "tt" or "bb" or "tb" or "bt";
+
+    /// <summary>윗 필드가 먼저인지 (tt, tb). bwdif의 parity에 쓴다.</summary>
+    public bool TopFieldFirst => FieldOrder is "tt" or "tb";
+
     /// <summary>모든 오디오 스트림의 코덱 이름. 오디오가 없으면 비어 있다.</summary>
     public IReadOnlyList<string> AudioCodecs { get; init; } = [];
 

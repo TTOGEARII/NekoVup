@@ -20,7 +20,7 @@ public sealed partial class BoxEditor : UserControl
 {
     private const double HandleSize = 9;
     private const double HandleReach = 9;   // 손잡이를 잡았다고 보는 거리(화면 픽셀)
-    private const double StageMargin = 26;  // 그림 둘레에 남기는 여백(화면 픽셀)
+    private const double StageMargin = 12;  // 그림 둘레에 남기는 여백(화면 픽셀)
 
     private MainViewModel? _viewModel;
     private int _videoWidth, _videoHeight;
@@ -62,7 +62,7 @@ public sealed partial class BoxEditor : UserControl
     /// <summary>그림 영역을 화면비를 지키면서 가능한 한 크게 잡는다. 박스 좌표는 이 영역에 대해 가로·세로 따로 선형으로 대응한다.</summary>
     private void ArrangeHost()
     {
-        // 재단선과 그림자가 들어갈 둘레 여백을 남긴다
+        // 화면이 패널 테두리에 붙지 않게 둘레 여백을 남긴다
         double roomWidth = Outer.ActualWidth - 2 * StageMargin, roomHeight = Outer.ActualHeight - 2 * StageMargin;
         if (_videoWidth == 0 || roomWidth < 1 || roomHeight < 1) return;
         double width = Math.Min(roomWidth, roomHeight * _aspect);

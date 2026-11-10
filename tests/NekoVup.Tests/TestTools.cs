@@ -68,6 +68,13 @@ internal static class TestTools
         }
     }
 
+    /// <summary>폴더 정션(같은 폴더를 가리키는 다른 이름)을 만든다. 관리자 권한 없이 된다.</summary>
+    public static void MakeJunction(string link, string target)
+    {
+        var result = Runner.RunAsync(new ToolInvocation("cmd.exe", ["/c", "mklink", "/J", link, target]), null, null, CancellationToken.None).GetAwaiter().GetResult();
+        Assert.True(result.ExitCode == 0 && Directory.Exists(link), "정션을 만들지 못했습니다: " + result.ErrorTail);
+    }
+
     public static async Task<string> Ffmpeg_(CancellationToken ct, params string[] args)
     {
         var result = await Runner.RunAsync(new ToolInvocation("ffmpeg", ["-hide_banner", "-nostdin", "-y", "-loglevel", "error", .. args]), null, null, ct);

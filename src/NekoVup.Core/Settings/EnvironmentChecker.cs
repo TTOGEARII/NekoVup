@@ -14,8 +14,18 @@ public enum CheckStatus
 public sealed record CheckItem(string Name, CheckStatus Status, string Detail);
 
 /// <summary>"환경 점검": 외부 도구가 설치되어 있고 실행되는지 확인한다.</summary>
-public sealed class EnvironmentChecker(AppSettings settings, IToolRunner runner)
+public sealed class EnvironmentChecker(AppSettings configured, IToolRunner runner, TimeSpan? stepTimeout = null)
 {
+    private const string PythonName = "Python + PyTorch", Video2XName = "Video2X";
+
+    private readonly AppSettings settings = BundledTools.Resolve(configured);
+
+    /// <summary>
+    /// 도구 하나를 기다리는 최대 시간. 경로 칸에 끝나지 않는 프로그램(창이 뜨는 프로그램 등)을 골랐을 때
+    /// 점검이 끝없이 돌며 ProPainter 준비까지 막지 않게 한다. torch를 처음 불러오는 데 걸리는 시간을 넉넉히 넘긴다.
+    /// </summary>
+    private readonly TimeSpan timeout = stepTimeout ?? TimeSpan.FromSeconds(90);
+
     /// <summary>ProPainter가 첫 실행 때 내려받는 가중치 파일.</summary>
     public static IReadOnlyList<string> ProPainterWeights { get; } =
         ["ProPainter.pth", "recurrent_flow_completion.pth", "raft-things.pth"];
@@ -24,14 +34,30 @@ public sealed class EnvironmentChecker(AppSettings settings, IToolRunner runner)
     {
         var items = new List<CheckItem>
         {
-            await VersionAsync("ffmpeg", settings.Ffmpeg, cancellationToken).ConfigureAwait(false),
-            await VersionAsync("ffprobe", settings.Ffprobe, cancellationToken).ConfigureAwait(false),
-            await PythonAsync(cancellationToken).ConfigureAwait(false),
+            await TimedAsync("ffmpeg", token => VersionAsync("ffmpeg", settings.Ffmpeg, token), cancellationToken).ConfigureAwait(false),
+            await TimedAsync("ffprobe", token => VersionAsync("ffprobe", settings.Ffprobe, token), cancellationToken).ConfigureAwait(false),
+            await TimedAsync(PythonName, PythonAsync, cancellationToken).ConfigureAwait(false),
             ProPainterFolder(),
-            await Video2XAsync(cancellationToken).ConfigureAwait(false),
+            await TimedAsync(Video2XName, Video2XAsync, cancellationToken).ConfigureAwait(false),
         };
         if (DiskSpace(workDirectory) is { } disk) items.Add(disk);
         return items;
+    }
+
+    /// <summary>한 항목을 시간 제한을 걸고 점검한다. 시간이 다 되면 도구를 끝내고(작업 개체째) 실패로 적는다.</summary>
+    private async Task<CheckItem> TimedAsync(string name, Func<CancellationToken, Task<CheckItem>> check, CancellationToken cancellationToken)
+    {
+        using var limit = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        limit.CancelAfter(timeout);
+        try
+        {
+            return await check(limit.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return new CheckItem(name, CheckStatus.Error, string.Create(CultureInfo.InvariantCulture,
+                $"{timeout.TotalSeconds:0.#}초 안에 끝나지 않아 멈췄습니다. 경로에 맞는 프로그램을 골랐는지 확인하세요."));
+        }
     }
 
     private async Task<CheckItem> VersionAsync(string name, string executable, CancellationToken cancellationToken)
@@ -40,7 +66,7 @@ public sealed class EnvironmentChecker(AppSettings settings, IToolRunner runner)
         {
             string output = await runner.RunCaptureAsync(new ToolInvocation(executable, ["-version"]), cancellationToken).ConfigureAwait(false);
             string first = output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).FirstOrDefault() ?? "";
-            return new CheckItem(name, CheckStatus.Ok, first);
+            return new CheckItem(name, CheckStatus.Ok, BundledTag(executable) + first);
         }
         catch (ToolFailedException ex)
         {
@@ -50,7 +76,7 @@ public sealed class EnvironmentChecker(AppSettings settings, IToolRunner runner)
 
     private async Task<CheckItem> PythonAsync(CancellationToken cancellationToken)
     {
-        const string name = "Python + PyTorch";
+        const string name = PythonName;
         if (string.IsNullOrWhiteSpace(settings.Python))
             return new CheckItem(name, CheckStatus.Warning, "파이썬 경로가 설정되지 않았습니다 (ProPainter 모드에 필요).");
         try
@@ -88,7 +114,7 @@ public sealed class EnvironmentChecker(AppSettings settings, IToolRunner runner)
 
     private async Task<CheckItem> Video2XAsync(CancellationToken cancellationToken)
     {
-        const string name = "Video2X";
+        const string name = Video2XName;
         if (string.IsNullOrWhiteSpace(settings.Video2X))
             return new CheckItem(name, CheckStatus.Warning, "경로가 설정되지 않았습니다 (업스케일에 필요).");
         if (!File.Exists(settings.Video2X))
@@ -100,7 +126,7 @@ public sealed class EnvironmentChecker(AppSettings settings, IToolRunner runner)
             var result = await runner.RunAsync(new ToolInvocation(settings.Video2X, ["-l"]),
                 line => { lock (output) output.AppendLine(line); }, null, cancellationToken).ConfigureAwait(false);
             var devices = Media.Video2X.ParseDevices(output.ToString());
-            if (devices.Count > 0) return new CheckItem(name, CheckStatus.Ok, "GPU " + string.Join(" / ", devices));
+            if (devices.Count > 0) return new CheckItem(name, CheckStatus.Ok, BundledTag(settings.Video2X) + "GPU " + string.Join(" / ", devices));
             return new CheckItem(name, CheckStatus.Warning,
                 result.ExitCode == 0 ? "쓸 수 있는 GPU(Vulkan)를 찾지 못했습니다." : $"GPU 목록을 읽지 못했습니다 (종료 코드 {result.ExitCode}).");
         }
@@ -129,6 +155,10 @@ public sealed class EnvironmentChecker(AppSettings settings, IToolRunner runner)
             return new CheckItem("디스크 여유 공간", CheckStatus.Warning, ex.Message);
         }
     }
+
+    /// <summary>프로그램에 들어 있는 도구를 쓰고 있으면 앞에 표시한다.</summary>
+    private static string BundledTag(string executable) =>
+        executable.StartsWith(BundledTools.Root, StringComparison.OrdinalIgnoreCase) ? "내장 · " : "";
 
     private static string FirstLine(string text) => text.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).FirstOrDefault() ?? text;
     private static string LastLine(string text) => text.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).LastOrDefault() ?? text;

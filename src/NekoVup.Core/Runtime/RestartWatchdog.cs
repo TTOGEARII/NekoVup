@@ -50,13 +50,15 @@ public static class RestartWatchdog
         // timeout은 콘솔이 없으면 실패할 수 있어 ping으로 기다린다 (-n N 은 약 N-1초).
         // PATH에 다른 find가 앞서 있는 환경이 있어 시스템 도구는 절대 경로로 부른다.
         // 되풀이는 for가 아니라 goto로 돈다 — for 안에서는 펼친 값 속의 %i 같은 글자가 for 변수로 바뀐다.
+        // 버전 파일은 cmd 내장 type으로 읽어 findstr에 넘긴다. findstr.exe는 파일을 시스템 ANSI 코드 페이지로 열어서,
+        // 그 코드 페이지에 없는 글자가 든 경로(영문 Windows의 한글 사용자 이름 등)는 찾지 못한다(실측: 이 PC에서 태국어·이모지 폴더 실패).
         return string.Create(CultureInfo.InvariantCulture, $"""
             @echo off
             setlocal EnableExtensions DisableDelayedExpansion
             set "sys=%SystemRoot%\System32"
             set waited=0
             :poll
-            "%sys%\findstr.exe" /c:"{VersionMarker(targetVersion)}" "%{VersionFileVariable}%" >nul 2>&1 && goto applied
+            type "%{VersionFileVariable}%" 2>nul | "%sys%\findstr.exe" /c:"{VersionMarker(targetVersion)}" >nul && goto applied
             set /a waited+=1
             if %waited% geq {timing.ApplyTimeoutSeconds} goto end
             "%sys%\ping.exe" -n 2 127.0.0.1 >nul

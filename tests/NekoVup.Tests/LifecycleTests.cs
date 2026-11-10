@@ -621,7 +621,8 @@ public class RestartWatchdogTests
     [Fact]
     public async Task Launches_A_Limited_Number_Of_Times_With_Growing_Waits()
     {
-        string dir = TestTools.NewTempDir("감시 100%i (괄호)");
+        // 시스템 코드 페이지(이 PC는 949, CI는 1252)에 없는 글자 — findstr.exe에 경로를 그대로 주면 파일을 찾지 못한다
+        string dir = TestTools.NewTempDir("감시 100%i (괄호) ทดสอบ 😀");
         try
         {
             string versionFile = Path.Combine(dir, "sq.version");
@@ -664,7 +665,7 @@ public class RestartWatchdogTests
     public async Task Leaves_A_Running_Program_Alone()
     {
         string running = TestTools.NewTempDir("감시 실행 중");
-        string absent = TestTools.NewTempDir("감시 꺼짐");
+        string absent = TestTools.NewTempDir("감시 꺼짐 ทดสอบ");
         try
         {
             foreach (string dir in (string[])[running, absent]) File.WriteAllText(Path.Combine(dir, "sq.version"), VersionFile("1.0.2"));
@@ -718,7 +719,9 @@ public class RestartWatchdogTests
         Assert.DoesNotContain('\n', script.Replace("\r\n", ""));
         // 경로는 글자로 적지 않고 환경 변수로 받는다 — 스크립트는 ASCII뿐이라 콘솔 코드 페이지와 상관없이 읽힌다
         Assert.All(script, c => Assert.True(c < 128, $"ASCII가 아닌 글자: U+{(int)c:X4}"));
-        Assert.Contains($@" ""%{RestartWatchdog.VersionFileVariable}%"" ", script);
+        // 버전 파일은 type(유니코드)으로 읽어 넘긴다 — findstr.exe는 ANSI 코드 페이지에 없는 글자가 든 경로를 열지 못한다
+        Assert.Contains($@"type ""%{RestartWatchdog.VersionFileVariable}%"" 2>nul | ", script);
+        Assert.DoesNotContain($@"findstr.exe"" /c:""<version>1.0.2</version>"" ""%", script);
         Assert.Equal($@"start """" ""%{RestartWatchdog.TargetVariable}%""", RestartWatchdog.LaunchCommand);
         Assert.Contains(@"/c:""<version>1.0.2</version>""", script);
         Assert.Equal("<version>1.0.2-beta.1+build.5</version>", RestartWatchdog.VersionMarker("1.0.2-beta.1+build.5"));

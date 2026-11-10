@@ -34,8 +34,11 @@ public sealed partial class BoxEditor : UserControl
 
     public BoxEditor() => InitializeComponent();
 
-    /// <summary>편집이 가능한지 (작업 중에는 막는다).</summary>
+    /// <summary>편집이 가능한지 (작업 중이거나 워터마크 제거를 껐으면 막는다).</summary>
     public bool IsEditable { get; set; } = true;
+
+    /// <summary>박스와 처리 영역을 그릴지. 워터마크 제거를 끄면 감춘다 (박스 값은 남아 있어 다시 켜면 그대로 보인다).</summary>
+    public bool ShowBoxes { get; set; } = true;
 
     public void Attach(MainViewModel viewModel)
     {
@@ -83,7 +86,7 @@ public sealed partial class BoxEditor : UserControl
     public void Redraw()
     {
         Overlay.Children.Clear();
-        if (_viewModel is null || _videoWidth == 0 || double.IsNaN(Host.Width)) return;
+        if (_viewModel is null || _videoWidth == 0 || double.IsNaN(Host.Width) || !ShowBoxes) return;
         if (_selected is not null && !_viewModel.Boxes.Contains(_selected)) _selected = null;
 
         // 처리 영역: 노란 점선

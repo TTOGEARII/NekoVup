@@ -46,6 +46,7 @@ public sealed partial class MainWindow : Window
         ApplyTheme();
 
         Editor.Attach(ViewModel);
+        UpdateEditorState();
 
         // 타임라인을 끄는 동안 프레임을 매번 뽑지 않도록 잠깐 멈췄을 때만 불러온다.
         _previewTimer = DispatcherQueue.CreateTimer();
@@ -144,14 +145,24 @@ public sealed partial class MainWindow : Window
             case nameof(MainViewModel.MessageIsError) or nameof(MainViewModel.HasMessage):
                 MessageBar.Severity = ViewModel.MessageIsError ? InfoBarSeverity.Error : InfoBarSeverity.Informational;
                 break;
-            case nameof(MainViewModel.IsRunning):
-                Editor.IsEditable = !ViewModel.IsRunning;
-                Editor.Redraw();
+            case nameof(MainViewModel.IsRunning) or nameof(MainViewModel.RemoveOn):
+                UpdateEditorState();
                 break;
             case nameof(MainViewModel.IsDark):
                 ApplyTheme();
                 break;
         }
+    }
+
+    /// <summary>
+    /// 미리보기의 워터마크 박스는 워터마크 제거를 켰을 때만 보이고 그릴 수 있다 (사용자 요청) — 업스케일만 할 때 박스를 그려도 쓰이지 않아 헷갈린다.
+    /// 작업 중에도 막는다.
+    /// </summary>
+    private void UpdateEditorState()
+    {
+        Editor.ShowBoxes = ViewModel.RemoveOn;
+        Editor.IsEditable = ViewModel.RemoveOn && !ViewModel.IsRunning;
+        Editor.Redraw();
     }
 
     private void OnLogChanged(object? sender, NotifyCollectionChangedEventArgs e)
@@ -196,6 +207,20 @@ public sealed partial class MainWindow : Window
     }
 
     private void OnPreviewSourceToggled(object sender, RoutedEventArgs e) => RequestPreview();
+
+    /// <summary>타임라인의 구간 손잡이를 끌었을 때.</summary>
+    private void OnTimelineRangeChanged(object? sender, EventArgs e) => ViewModel.SetRange(Timeline.RangeStart, Timeline.RangeEnd);
+
+    /// <summary>타임라인에서 I(시작)·O(끝) 키를 눌렀을 때.</summary>
+    private void OnTimelineRangeMark(object? sender, bool start)
+    {
+        if (start) ViewModel.MarkRangeStart();
+        else ViewModel.MarkRangeEnd();
+    }
+
+    private void OnRangeStartHereClick(object sender, RoutedEventArgs e) => ViewModel.MarkRangeStart();
+
+    private void OnRangeEndHereClick(object sender, RoutedEventArgs e) => ViewModel.MarkRangeEnd();
 
     private void RequestPreview()
     {

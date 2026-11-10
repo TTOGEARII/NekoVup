@@ -84,14 +84,125 @@ public sealed partial class MainViewModel : ObservableObject
 
     // ───────── 옵션 ─────────
 
-    /// <summary>타임라인에 칠할 처리 구간 길이(초). 0이면 전체.</summary>
-    public double RangeSeconds => TestSection ? TestLength : 0;
+    /// <summary>타임라인에서 고른 구간만 처리할지 (끄면 영상 전체). 사용자 요청: 특정 부분만 잘라서 렌더링.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(TimelineRangeStart))]
+    [NotifyPropertyChangedFor(nameof(TimelineRangeEnd))]
+    [NotifyPropertyChangedFor(nameof(RangeEditable))]
+    [NotifyPropertyChangedFor(nameof(RangeText))]
+    public partial bool RangeOn { get; set; }
+
+    /// <summary>구간의 시작(초, 원본 기준). 숫자 칸·타임라인 손잡이·I 키가 바꾼다.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(TimelineRangeStart))]
+    [NotifyPropertyChangedFor(nameof(TimelineRangeEnd))]
+    [NotifyPropertyChangedFor(nameof(RangeText))]
+    public partial double RangeStart { get; set; }
+
+    /// <summary>구간의 끝(초, 원본 기준). 숫자 칸·타임라인 손잡이·O 키가 바꾼다.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(TimelineRangeStart))]
+    [NotifyPropertyChangedFor(nameof(TimelineRangeEnd))]
+    [NotifyPropertyChangedFor(nameof(RangeText))]
+    public partial double RangeEnd { get; set; }
+
+    /// <summary>처리할 구간의 가장 짧은 길이(초).</summary>
+    private const double MinRangeSeconds = 0.1;
+
+    /// <summary>구간을 처음 켰을 때 잡는 길이(초) — 예전 "앞부분 10초 시험"과 같은 쓰임새.</summary>
+    private const double DefaultRangeSeconds = 10;
 
     /// <summary>
-    /// 시험 구간으로 실제로 처리할 길이(초). 숫자 칸을 비우면(NaN) 기본값 10초 —
-    /// 타임라인·예상치·작업이 모두 이 값을 써야 보이는 것과 처리하는 것이 같다.
+    /// 실제로 처리할 구간(초). 숫자 칸을 비웠거나(NaN) 영상 밖·거꾸로 적었어도 타임라인·예상치·작업이 모두 이 값을 쓴다 —
+    /// 그래야 보이는 것과 처리하는 것이 같다.
     /// </summary>
-    private double TestLength => Clamp(TestSeconds, 1, 86_400, 10);
+    private (double Start, double End) Range
+    {
+        get
+        {
+            double start = Clamp(RangeStart, 0, DurationSeconds, 0), end = Clamp(RangeEnd, 0, DurationSeconds, DurationSeconds);
+            return start <= end ? (start, end) : (end, start);
+        }
+    }
+
+    /// <summary>구간의 끝이 영상의 처음·끝과 이만큼(초) 안이면 처음부터·끝까지로 본다 (한 프레임보다 짧다).</summary>
+    private const double EdgeTolerance = 0.005;
+
+    /// <summary>작업에 넘길 구간. 처음부터면 시작이, 끝까지면 길이가 null이다 (둘 다 null이면 영상 전체).</summary>
+    private (double? Start, double? Length) JobRange()
+    {
+        if (!RangeOn) return (null, null);
+        var (start, end) = Range;
+        // 끝까지 고른 것은 길이를 주지 않는다 — 영상 정보의 길이가 실제 마지막 프레임보다 조금 짧으면 끝 장면이 잘린다.
+        return (start > EdgeTolerance ? start : null, end < DurationSeconds - EdgeTolerance ? end - start : null);
+    }
+
+    /// <summary>
+    /// 구간을 고를 수 있는지. 영상 정보에 길이가 없는 파일(일부 스트림·깨진 파일)은 타임라인이 0.1초짜리로 그려져,
+    /// 고른 구간과 실제로 처리되는 범위가 달라진다 — 그런 파일은 전체만 처리한다.
+    /// </summary>
+    public bool CanUseRange => HasVideo && Info is { DurationSeconds: > 0 };
+
+    /// <summary>타임라인에 칠할 구간 (둘 다 0이면 영상 전체).</summary>
+    public double TimelineRangeStart => RangeOn ? Range.Start : 0;
+
+    public double TimelineRangeEnd => RangeOn ? Range.End : 0;
+
+    /// <summary>타임라인의 구간 손잡이를 끌 수 있는지.</summary>
+    public bool RangeEditable => RangeOn && !IsRunning;
+
+    /// <summary>구간 칸 아래의 한 줄.</summary>
+    public string RangeText
+    {
+        get
+        {
+            if (HasVideo && !CanUseRange) return "영상 길이를 알 수 없는 파일이라 구간을 고를 수 없습니다. 전체를 처리합니다.";
+            if (!RangeOn) return "영상 전체를 처리합니다.";
+            var (start, end) = Range;
+            return string.Create(CultureInfo.InvariantCulture,
+                $"{FormatTime(start)} ~ {FormatTime(end)} ({end - start:0.0}초)만 처리합니다. 타임라인 구간 양 끝의 손잡이를 끌거나, 타임라인을 누른 뒤 I(시작)·O(끝) 키로도 정합니다.");
+        }
+    }
+
+    /// <summary>재생 헤드 자리를 구간의 시작으로 (I 키, [현재 위치] 단추). 끝이 그보다 앞이면 끝을 10초 뒤로 민다. 구간을 꺼 두었으면 켠다.</summary>
+    public void MarkRangeStart()
+    {
+        if (!CanUseRange || IsRunning) return;
+        double start = Math.Clamp(PreviewSeconds, 0, DurationSeconds);
+        double end = RangeOn && Range.End - start >= MinRangeSeconds ? Range.End : Math.Min(DurationSeconds, start + DefaultRangeSeconds);
+        SetRange(start, end);
+    }
+
+    /// <summary>재생 헤드 자리를 구간의 끝으로 (O 키, [현재 위치] 단추). 시작이 그보다 뒤면 시작을 10초 앞으로 당긴다.</summary>
+    public void MarkRangeEnd()
+    {
+        if (!CanUseRange || IsRunning) return;
+        double end = Math.Clamp(PreviewSeconds, 0, DurationSeconds);
+        double start = RangeOn && end - Range.Start >= MinRangeSeconds ? Range.Start : Math.Max(0, end - DefaultRangeSeconds);
+        SetRange(start, end);
+    }
+
+    /// <summary>
+    /// 구간을 정하고 켠다 (타임라인 손잡이를 끌 때도 부른다). 숫자 칸에 긴 소수가 보이지 않게 0.01초로 맞추되,
+    /// 영상의 처음·끝에 붙인 것은 반올림하지 않는다 — 끝을 0.01초 앞으로 깎으면 "끝까지"가 아니게 된다.
+    /// </summary>
+    public void SetRange(double start, double end)
+    {
+        if (!CanUseRange || IsRunning) return;
+        start = start <= EdgeTolerance ? 0 : Math.Round(start, 2);
+        end = end >= DurationSeconds - EdgeTolerance ? DurationSeconds : Math.Round(end, 2);
+        // 값을 먼저 넣고 켠다 — 켜는 순간 구간이 비어 있으면 기본 구간으로 덮어쓴다(OnRangeOnChanged).
+        (RangeStart, RangeEnd) = (start, end);
+        RangeOn = true;
+    }
+
+    /// <summary>구간을 처음 켰을 때: 지금 보고 있는 자리부터 10초 (영상 끝에 닿으면 앞으로 당긴다).</summary>
+    private void PlaceDefaultRange()
+    {
+        double length = Math.Min(DefaultRangeSeconds, DurationSeconds);
+        double start = Math.Clamp(PreviewSeconds, 0, Math.Max(0, DurationSeconds - length));
+        (RangeStart, RangeEnd) = (Math.Round(start, 2), Math.Round(start + length, 2));
+    }
 
     /// <summary>워터마크 제거 단계의 스위치.</summary>
     [ObservableProperty]
@@ -162,14 +273,6 @@ public sealed partial class MainViewModel : ObservableObject
     public string SharpenText => Sharpen <= 0 ? "끔" : ((int)Sharpen).ToString(CultureInfo.InvariantCulture);
 
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(RangeSeconds))]
-    public partial bool TestSection { get; set; }
-
-    [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(RangeSeconds))]
-    public partial double TestSeconds { get; set; } = 10;
-
-    [ObservableProperty]
     public partial double Pad { get; set; } = 96;
 
     [ObservableProperty]
@@ -215,6 +318,7 @@ public sealed partial class MainViewModel : ObservableObject
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(NotRunning))]
     [NotifyPropertyChangedFor(nameof(CanStart))]
+    [NotifyPropertyChangedFor(nameof(RangeEditable))]
     public partial bool IsRunning { get; set; }
 
     public bool NotRunning => !IsRunning;
@@ -329,8 +433,11 @@ public sealed partial class MainViewModel : ObservableObject
             PreviewResult = false;
             HasResult = false;
             ResultPath = null;
-            _resultSeconds = null;
+            _resultRange = null;
             Boxes.Clear();
+            // 구간은 영상마다 다르다 — 새 영상에서는 꺼 두고, 켜면 그 영상에서 다시 잡는다.
+            RangeOn = false;
+            (RangeStart, RangeEnd) = (0, 0);
 
             string aspect = info.SampleAspectRatio is { Num: var n, Den: var d } && n != d
                 ? string.Create(CultureInfo.InvariantCulture, $" (화면비 {info.DisplayAspect:0.00}:1)")
@@ -346,6 +453,9 @@ public sealed partial class MainViewModel : ObservableObject
             OutputPath = Path.Combine(Path.GetDirectoryName(info.Path)!, Path.GetFileNameWithoutExtension(info.Path) + " [nekoVup]" + extension);
 
             HasVideo = true;
+            // 영상마다 다르다 (길이를 모르는 파일은 구간을 못 고른다). 두 번째 영상부터는 HasVideo가 그대로라 직접 알린다.
+            OnPropertyChanged(nameof(CanUseRange));
+            OnPropertyChanged(nameof(RangeText));
             StatusText = "준비됨";
             PreviewSeconds = Math.Min(DurationSeconds / 2, 60);
             // 시각이 앞 영상과 같으면 위 줄이 아무 일도 하지 않아 전체 길이 표시가 옛 값으로 남는다.
@@ -379,6 +489,7 @@ public sealed partial class MainViewModel : ObservableObject
 
         await LoadVideoAsync(file);
         if (!HasVideo) return;
+        double? rangeStart = null, rangeLength = null;
         foreach (var (name, value) in options)
         {
             switch (name)
@@ -402,8 +513,12 @@ public sealed partial class MainViewModel : ObservableObject
                 case "--scale" when int.TryParse(value, out int scale) && scale is >= 2 and <= 4:
                     ScaleIndex = scale - 2;
                     break;
-                case "--test-seconds" when double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out double seconds) && double.IsFinite(seconds) && seconds > 0:
-                    (TestSection, TestSeconds) = (true, seconds);
+                // 처리할 구간: --start 시작(초), --duration(= --test-seconds) 길이(초). 명령줄 판과 같은 이름이다.
+                case "--start" when double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out double begin) && double.IsFinite(begin) && begin >= 0:
+                    rangeStart = begin;
+                    break;
+                case "--duration" or "--test-seconds" when double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out double seconds) && double.IsFinite(seconds) && seconds > 0:
+                    rangeLength = seconds;
                     break;
                 case "--output" when value.Trim().Length > 0:
                     // 경로로 읽을 수 없는 값은 버린다 — 예외가 나면 뒤에 적힌 옵션까지 적용되지 않는다.
@@ -411,6 +526,11 @@ public sealed partial class MainViewModel : ObservableObject
                     catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException) { }
                     break;
             }
+        }
+        if (rangeStart is not null || rangeLength is not null)
+        {
+            double start = rangeStart ?? 0;
+            SetRange(start, rangeLength is { } length ? start + length : DurationSeconds);
         }
     }
 
@@ -420,8 +540,9 @@ public sealed partial class MainViewModel : ObservableObject
         bool result = PreviewResult && ResultPath is not null;
         string? path = result ? ResultPath : Info?.Path;
         if (path is null) return null;
-        // 앞부분만 처리한 결과는 원본보다 짧다. 끝을 넘긴 시각을 달라고 하면 그림이 나오지 않아 원본 화면이 그대로 남는다.
-        if (result && _resultSeconds is { } length) seconds = Math.Min(seconds, LastPreviewable(length));
+        // 구간만 처리한 결과는 그 구간의 시작이 0초다 — 원본 시각을 결과 파일의 시각으로 옮긴다.
+        // 결과 밖의 시각을 달라고 하면 그림이 나오지 않아 원본 화면이 그대로 남는다.
+        if (result) seconds = ToResultTime(seconds);
         try
         {
             return await _runner.CaptureBytesAsync(new ToolInvocation(BundledTools.Resolve(Settings).Ffmpeg, FfmpegCommands.PreviewFrame(path, seconds)), cancellationToken);
@@ -434,26 +555,34 @@ public sealed partial class MainViewModel : ObservableObject
 
     partial void OnPreviewSecondsChanged(double value) => PreviewTimeText = FormatTime(value) + " / " + FormatTime(DurationSeconds);
 
-    /// <summary>결과 파일의 길이(초). 앞부분만 처리했을 때만 값이 있다 (전체를 처리했으면 원본과 같다).</summary>
-    private double? _resultSeconds;
+    /// <summary>결과 파일이 담은 원본 구간 (원본 기준 시작, 길이). 영상 전체를 처리했으면 null.</summary>
+    private (double Start, double Length)? _resultRange;
 
     /// <summary>길이가 이만큼인 파일에서 그림을 뽑을 수 있는 마지막 시각 (끝에서 조금 앞).</summary>
     private static double LastPreviewable(double length) => Math.Max(0, length - 0.5);
 
+    /// <summary>원본 시각 → 결과 파일에서 그림을 뽑을 시각. 결과 구간 밖이면 가까운 끝으로.</summary>
+    private double ToResultTime(double seconds) =>
+        _resultRange is { } range ? Math.Clamp(seconds - range.Start, 0, LastPreviewable(range.Length)) : seconds;
+
+    /// <summary>결과를 보는 중이면 원본 시각을 결과가 담은 구간 안으로 당긴다.</summary>
+    private double ClampToResult(double seconds) =>
+        _resultRange is { } range ? Math.Clamp(seconds, range.Start, range.Start + LastPreviewable(range.Length)) : seconds;
+
     /// <summary>
-    /// 미리보기 시각을 옮긴다. 앞부분만 처리한 결과를 보는 중이면 결과의 끝을 넘기지 않는다 —
-    /// 넘기면 표시는 그 시각인데 화면은 결과의 마지막 장면인 채로 남는다.
+    /// 미리보기 시각을 옮긴다. 구간만 처리한 결과를 보는 중이면 그 구간 밖으로 나가지 않는다 —
+    /// 나가면 표시는 그 시각인데 화면은 결과의 첫·마지막 장면인 채로 남는다.
     /// </summary>
     public void SeekPreview(double seconds)
     {
-        if (PreviewResult && ResultPath is not null && _resultSeconds is { } length) seconds = Math.Min(seconds, LastPreviewable(length));
+        if (PreviewResult && ResultPath is not null) seconds = ClampToResult(seconds);
         PreviewSeconds = seconds;
     }
 
     partial void OnPreviewResultChanged(bool value)
     {
-        // 결과가 끝난 뒤의 시각을 보고 있었으면 결과의 끝으로 옮긴다 — 안 그러면 "결과"로 바꿔도 화면이 그대로다.
-        if (value && _resultSeconds is { } length && PreviewSeconds > LastPreviewable(length)) PreviewSeconds = LastPreviewable(length);
+        // 결과 구간 밖의 시각을 보고 있었으면 안으로 옮긴다 — 안 그러면 "결과"로 바꿔도 화면이 그대로다.
+        if (value && ResultPath is not null) PreviewSeconds = ClampToResult(PreviewSeconds);
     }
 
     // ═════════════════════ 박스 ═════════════════════
@@ -489,8 +618,25 @@ public sealed partial class MainViewModel : ObservableObject
     partial void OnScaleIndexChanged(int value) => UpdateDerived();
     partial void OnPadChanged(double value) => UpdateDerived();
     partial void OnMaxAreaChanged(double value) => UpdateDerived();
-    partial void OnTestSectionChanged(bool value) => UpdateDerived();
-    partial void OnTestSecondsChanged(double value) => UpdateDerived();
+    partial void OnRangeOnChanged(bool value)
+    {
+        // 처음 켜면(정해 둔 구간이 없으면) 지금 보고 있는 자리부터 10초를 잡는다. 정해 둔 구간이 있으면(짧아도) 그대로 쓴다.
+        if (value && RangeStart == 0 && RangeEnd == 0) PlaceDefaultRange();
+        UpdateDerived();
+    }
+
+    partial void OnRangeStartChanged(double value) => OnRangeEdited();
+    partial void OnRangeEndChanged(double value) => OnRangeEdited();
+
+    /// <summary>
+    /// 구간을 고치기 시작하면 미리보기를 원본으로 돌린다 — 결과를 보는 중에는 재생 헤드가 결과 구간 안으로 당겨져,
+    /// 손잡이를 끌어도 새로 자를 자리의 장면을 볼 수 없다.
+    /// </summary>
+    private void OnRangeEdited()
+    {
+        if (PreviewResult) PreviewResult = false;
+        UpdateDerived();
+    }
 
     /// <summary>박스·옵션에서 따라 나오는 표시(처리 영역, 경고, 결과 크기)를 다시 계산한다.</summary>
     private void UpdateDerived()
@@ -515,7 +661,8 @@ public sealed partial class MainViewModel : ObservableObject
                 {
                     var regions = RegionPlanner.Plan(boxes, info.Width, info.Height, BuildRegionOptions());
                     RegionRects = [.. regions.Select(r => r.Rect)];
-                    long frames = info.EstimateFrames(null, TestSection ? TestLength : null);
+                    var (rangeStart, rangeLength) = JobRange();
+                    long frames = info.EstimateFrames(rangeStart, rangeLength);
                     double gb = JobRunner.EstimateTempBytes(regions, frames) / 1024.0 / 1024.0 / 1024.0;
                     RegionText = string.Create(CultureInfo.InvariantCulture,
                         $"처리 영역 {string.Join(", ", regions.Select(r => $"{r.Rect.Width}×{r.Rect.Height}"))} (점선) · 임시 공간 약 {gb:0.0} GB");
@@ -579,6 +726,17 @@ public sealed partial class MainViewModel : ObservableObject
             ShowError("워터마크 위치가 없습니다. 미리보기 위에서 끌어서 박스를 그리거나 워터마크 제거를 끄세요.");
             return null;
         }
+        if (RangeOn && !CanUseRange)
+        {
+            ShowError("영상 길이를 알 수 없는 파일이라 구간을 고를 수 없습니다. '일부 구간만 처리'를 끄고 전체를 처리하세요.");
+            return null;
+        }
+        // 손잡이로 줄일 수 있는 가장 짧은 구간(0.1초)도 받는다 — 부동소수점 오차로 0.0999…가 되어도.
+        if (RangeOn && Range.End - Range.Start < MinRangeSeconds - 1e-6)
+        {
+            ShowError("처리할 구간이 너무 짧습니다. 타임라인에서 구간의 시작과 끝을 다시 정하세요.");
+            return null;
+        }
         if (Unquote(OutputPath).Length == 0)
         {
             ShowError("출력 파일을 지정하세요.");
@@ -600,7 +758,8 @@ public sealed partial class MainViewModel : ObservableObject
                 Mode = mode,
                 Upscale = upscale,
                 Scale = ScaleIndex + 2,
-                DurationSeconds = TestSection ? TestLength : null,
+                StartSeconds = JobRange().Start,
+                DurationSeconds = JobRange().Length,
                 Region = BuildRegionOptions(),
                 ChunkLength = (int)Clamp(ChunkLength, 20, 1000, 100),
                 Overlap = (int)Clamp(Overlap, 0, 200, 10),
@@ -682,7 +841,7 @@ public sealed partial class MainViewModel : ObservableObject
         HasResult = false;
         PreviewResult = false;
         ResultPath = null;
-        _resultSeconds = null;
+        _resultRange = null;
         _jobDone = new TaskCompletionSource();
         IsRunning = true;
         StageText = "준비 중";
@@ -711,7 +870,12 @@ public sealed partial class MainViewModel : ObservableObject
         {
             var result = await Task.Run(() => jobRunner.RunAsync(request, progress, token), token);
             ResultPath = result.OutputPath;
-            _resultSeconds = request.Options.DurationSeconds is { } seconds && seconds < DurationSeconds ? seconds : null;
+            // 구간만 처리했으면 결과 파일의 0초가 원본의 구간 시작이다 (미리보기에서 원본 시각과 맞춰 보여 준다).
+            if (request.Options.StartSeconds is not null || request.Options.DurationSeconds is not null)
+            {
+                double start = request.Options.StartSeconds ?? 0;
+                _resultRange = (start, request.Options.DurationSeconds ?? Math.Max(0, DurationSeconds - start));
+            }
             HasResult = true;
             StageText = "완료";
             DetailText = string.Create(CultureInfo.InvariantCulture, $"{result.FrameCount}프레임 · {EtaEstimator.Format(result.Elapsed)} 걸림");

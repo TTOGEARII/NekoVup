@@ -212,9 +212,12 @@
                                 </Grid>
                             </Border>
                             <controls:TimelineStrip x:Name="Timeline" PositionChanged="OnTimelineSeek"
+                                                    RangeChanged="OnTimelineRangeChanged" RangeMarkRequested="OnTimelineRangeMark"
                                                     Duration="{x:Bind ViewModel.DurationSeconds, Mode=OneWay}"
                                                     Position="{x:Bind ViewModel.PreviewSeconds, Mode=OneWay}"
-                                                    RangeSeconds="{x:Bind ViewModel.RangeSeconds, Mode=OneWay}"
+                                                    RangeStart="{x:Bind ViewModel.TimelineRangeStart, Mode=OneWay}"
+                                                    RangeEnd="{x:Bind ViewModel.TimelineRangeEnd, Mode=OneWay}"
+                                                    RangeEditable="{x:Bind ViewModel.RangeEditable, Mode=OneWay}"
                                                     ClipName="{x:Bind ViewModel.FileName, Mode=OneWay}" />
                         </StackPanel>
                     </Border>
@@ -349,12 +352,30 @@
                                 <Border Style="{StaticResource SectionHeader}">
                                     <TextBlock Style="{StaticResource SectionTitle}" Text="구간" />
                                 </Border>
-                                <StackPanel Orientation="Horizontal" Spacing="8">
-                                    <CheckBox Content="앞부분만 시험 삼아 처리" IsChecked="{x:Bind ViewModel.TestSection, Mode=TwoWay}" MinWidth="0" />
-                                    <NumberBox Width="84" Minimum="1" SmallChange="5" Value="{x:Bind ViewModel.TestSeconds, Mode=TwoWay}"
-                                               IsEnabled="{x:Bind ViewModel.TestSection, Mode=OneWay}" />
-                                    <TextBlock Text="초" VerticalAlignment="Center" Foreground="{ThemeResource NekoText}" />
-                                </StackPanel>
+                                <CheckBox Content="일부 구간만 처리" IsChecked="{x:Bind ViewModel.RangeOn, Mode=TwoWay}" MinWidth="0"
+                                          IsEnabled="{x:Bind ViewModel.CanUseRange, Mode=OneWay}" />
+                                <Grid ColumnSpacing="6" RowSpacing="6" Margin="0,4,0,0" Visibility="{x:Bind ViewModel.RangeOn, Mode=OneWay}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                    </Grid.RowDefinitions>
+                                    <TextBlock Text="시작(초)" VerticalAlignment="Center" Foreground="{ThemeResource NekoText}" />
+                                    <NumberBox Grid.Column="1" Minimum="0" Maximum="{x:Bind ViewModel.DurationSeconds, Mode=OneWay}" SmallChange="0.1" LargeChange="1"
+                                               Value="{x:Bind ViewModel.RangeStart, Mode=TwoWay}" AutomationProperties.Name="구간 시작(초)" />
+                                    <Button Grid.Column="2" Content="현재 위치" Click="OnRangeStartHereClick"
+                                            AutomationProperties.Name="구간 시작을 현재 위치로" ToolTipService.ToolTip="재생 헤드 자리를 구간의 시작으로 (I)" />
+                                    <TextBlock Grid.Row="1" Text="끝(초)" VerticalAlignment="Center" Foreground="{ThemeResource NekoText}" />
+                                    <NumberBox Grid.Row="1" Grid.Column="1" Minimum="0" Maximum="{x:Bind ViewModel.DurationSeconds, Mode=OneWay}" SmallChange="0.1" LargeChange="1"
+                                               Value="{x:Bind ViewModel.RangeEnd, Mode=TwoWay}" AutomationProperties.Name="구간 끝(초)" />
+                                    <Button Grid.Row="1" Grid.Column="2" Content="현재 위치" Click="OnRangeEndHereClick"
+                                            AutomationProperties.Name="구간 끝을 현재 위치로" ToolTipService.ToolTip="재생 헤드 자리를 구간의 끝으로 (O)" />
+                                </Grid>
+                                <TextBlock Text="{x:Bind ViewModel.RangeText, Mode=OneWay}" Style="{StaticResource HintText}" Margin="0,4,0,0" />
 
                                 <!-- 출력 -->
                                 <Border Style="{StaticResource SectionHeader}">

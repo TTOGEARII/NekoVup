@@ -592,16 +592,28 @@ public class RestartWatchdogTests
         </package>
         """;
 
+    /// <summary>띄운 흔적(launch-N.txt)을 남길 폴더를 받는 환경 변수 — 프로그램과 같이 경로는 환경 변수로만 넘긴다.</summary>
+    private const string DirVariable = "NEKOVUP_TEST_DIR";
+
     /// <summary>
-    /// 감시 스크립트를 폴더에 쓰고 프로그램과 같은 방식(cmd /d /c .\이름, 작업 폴더 = 스크립트가 있는 곳)으로 끝까지 돌린다.
+    /// 감시 스크립트를 폴더에 쓰고 프로그램과 같은 방식(cmd /d /c .\이름, 작업 폴더 = 스크립트가 있는 곳, 경로는 환경 변수)으로 끝까지 돌린다.
     /// 띄울 때마다 launch-N.txt가 남는다 (N은 스크립트가 세는 횟수).
+    /// 영문 Windows(CI)처럼 콘솔 코드 페이지를 437로 두고 돌린다 — 예전처럼 한글 경로를 스크립트에 적었으면 여기서 깨진다.
     /// </summary>
     private static async Task<string[]> RunAsync(string dir, string targetVersion, string imageName, WatchdogTiming timing)
     {
-        string launch = $"echo x>\"{RestartWatchdog.Escape(dir)}\\launch-%tries%.txt\"";
-        File.WriteAllText(Path.Combine(dir, "watch.cmd"), RestartWatchdog.BuildScript(Path.Combine(dir, "sq.version"), targetVersion, imageName, launch, timing));
+        string launch = $"echo x>\"%{DirVariable}%\\launch-%tries%.txt\"";
+        File.WriteAllText(Path.Combine(dir, "watch.cmd"), RestartWatchdog.BuildScript(targetVersion, imageName, launch, timing));
         await TestTools.Runner.RunAsync(
-            new ToolInvocation(Path.Combine(Environment.SystemDirectory, "cmd.exe"), ["/d", "/c", @".\watch.cmd"]) { WorkingDirectory = dir },
+            new ToolInvocation(Path.Combine(Environment.SystemDirectory, "cmd.exe"), ["/d", "/c", @"chcp 437 >nul & .\watch.cmd"])
+            {
+                WorkingDirectory = dir,
+                Environment = new Dictionary<string, string>
+                {
+                    [RestartWatchdog.VersionFileVariable] = Path.Combine(dir, "sq.version"),
+                    [DirVariable] = dir,
+                },
+            },
             null, null, TestContext.Current.CancellationToken);
         return [.. Directory.GetFiles(dir, "launch-*.txt").Order(StringComparer.Ordinal)];
     }
@@ -698,16 +710,16 @@ public class RestartWatchdogTests
     }
 
     [Fact]
-    public void Script_Keeps_Paths_Literal_And_Uses_The_Real_Waits()
+    public void Script_Takes_Paths_From_The_Environment_And_Uses_The_Real_Waits()
     {
-        string script = RestartWatchdog.BuildScript(@"C:\Users\100%user\AppData\Local\NekoVup\current\sq.version", "1.0.2", "NekoVup.exe",
-            RestartWatchdog.LaunchCommand(@"C:\Users\100%user\AppData\Local\NekoVup\NekoVup.exe"));
+        string script = RestartWatchdog.BuildScript("1.0.2", "NekoVup.exe", RestartWatchdog.LaunchCommand);
 
         // 줄 끝은 모두 CRLF — LF뿐이면 goto가 표지를 못 찾을 때가 있다
         Assert.DoesNotContain('\n', script.Replace("\r\n", ""));
-        // 경로의 %는 두 번 적혀 글자 그대로 읽힌다
-        Assert.Contains(@" ""C:\Users\100%%user\AppData\Local\NekoVup\current\sq.version"" ", script);
-        Assert.Contains(@"start """" ""C:\Users\100%%user\AppData\Local\NekoVup\NekoVup.exe""", script);
+        // 경로는 글자로 적지 않고 환경 변수로 받는다 — 스크립트는 ASCII뿐이라 콘솔 코드 페이지와 상관없이 읽힌다
+        Assert.All(script, c => Assert.True(c < 128, $"ASCII가 아닌 글자: U+{(int)c:X4}"));
+        Assert.Contains($@" ""%{RestartWatchdog.VersionFileVariable}%"" ", script);
+        Assert.Equal($@"start """" ""%{RestartWatchdog.TargetVariable}%""", RestartWatchdog.LaunchCommand);
         Assert.Contains(@"/c:""<version>1.0.2</version>""", script);
         Assert.Equal("<version>1.0.2-beta.1+build.5</version>", RestartWatchdog.VersionMarker("1.0.2-beta.1+build.5"));
         // 3분 동안 적용을 기다리고, 적용 4초 뒤부터 10초·20초…로 늘려 가며 여섯 번까지 띄운다
@@ -727,6 +739,6 @@ public class RestartWatchdogTests
     public void Version_With_Characters_No_Version_Has_Is_Not_Put_Into_A_Script(string version)
     {
         Assert.Throws<ArgumentException>(() => RestartWatchdog.VersionMarker(version));
-        Assert.Throws<ArgumentException>(() => RestartWatchdog.BuildScript(@"C:\x\sq.version", version, "NekoVup.exe", "rem"));
+        Assert.Throws<ArgumentException>(() => RestartWatchdog.BuildScript(version, "NekoVup.exe", "rem"));
     }
 }

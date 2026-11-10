@@ -12,6 +12,13 @@ public sealed record WatchdogTiming(int ApplyTimeoutSeconds = 180, int SettleSec
 public static class RestartWatchdog
 {
     /// <summary>
+    /// 감시 스크립트가 경로(설치 폴더의 버전 파일, 띄울 실행 파일)를 받는 환경 변수. 경로를 스크립트에 글자로 적지 않는다 —
+    /// cmd는 배치 파일을 콘솔 코드 페이지로 읽는데, 영문 Windows에서는 chcp 65001이 듣지 않아 한글이 든 경로가 깨졌다(CI에서 실제로 실패).
+    /// 환경 변수는 유니코드 그대로 넘어가고, 펼칠 때 값 속의 %나 괄호를 다시 해석하지도 않는다.
+    /// </summary>
+    public const string VersionFileVariable = "NEKOVUP_VERSION_FILE", TargetVariable = "NEKOVUP_TARGET";
+
+    /// <summary>
     /// 설치 폴더의 버전 파일(sq.version)에서 "이 버전이 적용됐다"를 알아보는 글자.
     /// 닫는 태그까지 맞춰 본다 — 앞부분만 보면 1.0.2-beta가 깔린 상태에서 1.0.2를 이미 적용된 것으로 잘못 안다.
     /// </summary>
@@ -32,26 +39,24 @@ public static class RestartWatchdog
     /// 백신이 풀어 줄 때까지 몇 분은 버티되, 새 버전이 뜨자마자 죽는 경우에 끝없이 다시 띄우지는 않는다.</item>
     /// </list>
     /// </summary>
-    /// <param name="versionFile">설치 폴더의 버전 파일.</param>
     /// <param name="targetVersion">적용될 버전.</param>
     /// <param name="imageName">떠 있는지 볼 프로세스 이름 (NekoVup.exe).</param>
     /// <param name="launchCommand">프로그램을 실행하는 배치 명령 한 줄 (<see cref="LaunchCommand"/>).</param>
     /// <param name="timing">기다리는 시간과 횟수. 없으면 기본값.</param>
-    public static string BuildScript(string versionFile, string targetVersion, string imageName, string launchCommand, WatchdogTiming? timing = null)
+    /// <remarks>버전 파일 경로는 <see cref="VersionFileVariable"/> 환경 변수로 받는다. 스크립트 글자는 ASCII뿐이다.</remarks>
+    public static string BuildScript(string targetVersion, string imageName, string launchCommand, WatchdogTiming? timing = null)
     {
         timing ??= new WatchdogTiming();
         // timeout은 콘솔이 없으면 실패할 수 있어 ping으로 기다린다 (-n N 은 약 N-1초).
         // PATH에 다른 find가 앞서 있는 환경이 있어 시스템 도구는 절대 경로로 부른다.
-        // 스크립트를 UTF-8로 쓰므로 한글이 든 경로도 읽히게 코드 페이지를 먼저 바꾼다.
-        // 되풀이는 for가 아니라 goto로 돈다 — for 안에 적은 경로는 %를 두 번 적어도 %i 같은 글자가 for 변수로 바뀐다.
+        // 되풀이는 for가 아니라 goto로 돈다 — for 안에서는 펼친 값 속의 %i 같은 글자가 for 변수로 바뀐다.
         return string.Create(CultureInfo.InvariantCulture, $"""
             @echo off
             setlocal EnableExtensions DisableDelayedExpansion
-            chcp 65001 >nul
             set "sys=%SystemRoot%\System32"
             set waited=0
             :poll
-            "%sys%\findstr.exe" /c:"{VersionMarker(targetVersion)}" "{Escape(versionFile)}" >nul 2>&1 && goto applied
+            "%sys%\findstr.exe" /c:"{VersionMarker(targetVersion)}" "%{VersionFileVariable}%" >nul 2>&1 && goto applied
             set /a waited+=1
             if %waited% geq {timing.ApplyTimeoutSeconds} goto end
             "%sys%\ping.exe" -n 2 127.0.0.1 >nul
@@ -73,9 +78,8 @@ public static class RestartWatchdog
             """).ReplaceLineEndings("\r\n"); // 줄 끝이 LF뿐인 배치 파일은 goto가 표지를 못 찾을 때가 있다
     }
 
-    /// <summary>실행 파일을 띄우는 배치 명령. start로 띄워야 프로그램이 끝날 때까지 스크립트가 붙잡혀 있지 않는다.</summary>
-    public static string LaunchCommand(string executable) => $"start \"\" \"{Escape(executable)}\"";
-
-    /// <summary>배치 파일 안에서 %는 변수 표시다 — 경로에 들어 있으면 두 번 적어야 글자 그대로 읽힌다.</summary>
-    public static string Escape(string path) => path.Replace("%", "%%");
+    /// <summary>
+    /// 실행 파일(<see cref="TargetVariable"/> 환경 변수)을 띄우는 배치 명령. start로 띄워야 프로그램이 끝날 때까지 스크립트가 붙잡혀 있지 않는다.
+    /// </summary>
+    public static string LaunchCommand { get; } = $"start \"\" \"%{TargetVariable}%\"";
 }

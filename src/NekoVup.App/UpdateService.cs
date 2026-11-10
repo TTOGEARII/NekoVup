@@ -239,8 +239,8 @@ public sealed class UpdateService
             string versionFile = Path.Combine(InstallRoot, "current", "sq.version");
             if (!File.Exists(stub)) return;
 
-            // 기다리는 시간(3분)은 안내 창과 같다. BOM 없는 UTF-8로 쓴다 (BOM이 있으면 첫 줄이 명령으로 읽히지 않는다).
-            File.WriteAllText(WatchdogScript, RestartWatchdog.BuildScript(versionFile, targetVersion, ExeName + ".exe", RestartWatchdog.LaunchCommand(stub)));
+            // 기다리는 시간(3분)은 안내 창과 같다. 스크립트는 ASCII뿐이고, 경로는 아래에서 환경 변수로 넘긴다.
+            File.WriteAllText(WatchdogScript, RestartWatchdog.BuildScript(targetVersion, ExeName + ".exe", RestartWatchdog.LaunchCommand));
 
             var start = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "cmd.exe"))
             {
@@ -254,6 +254,9 @@ public sealed class UpdateService
             start.ArgumentList.Add("/d");
             start.ArgumentList.Add("/c");
             start.ArgumentList.Add(@".\" + WatchdogScriptName);
+            // 경로를 스크립트에 적으면 cmd가 콘솔 코드 페이지로 읽어 한글 등이 든 경로(사용자 이름)가 깨질 수 있다 — 환경 변수로 넘긴다.
+            start.Environment[RestartWatchdog.VersionFileVariable] = versionFile;
+            start.Environment[RestartWatchdog.TargetVariable] = stub;
             Process.Start(start)?.Dispose();
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception or ArgumentException)

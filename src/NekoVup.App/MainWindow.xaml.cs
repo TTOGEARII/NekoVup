@@ -133,10 +133,12 @@ public sealed partial class MainWindow : Window
 
     private void OnVideoChanged(object? sender, EventArgs e)
     {
-        var info = ViewModel.Info!;
         // 앞 영상에서 뽑고 있던 그림이 뒤늦게 도착해 새 영상 위에 그려지지 않게 한다.
         _previewCancel?.Cancel();
+        _previewTimer.Stop();
         Editor.SetImage(null);
+        Editor.SetCompareImage(null);
+        if (ViewModel.Info is not { } info) return; // 목록을 다 비웠다
         Editor.SetVideo(info.Width, info.Height, info.DisplayAspect);
         RequestPreview();
     }
@@ -292,8 +294,12 @@ public sealed partial class MainWindow : Window
             bool compare = Editor.CompareMode;
             // 시각은 한 번만 읽는다 — 첫 그림을 뽑는 사이에 재생 헤드가 움직이면 양쪽이 서로 다른 장면이 된다.
             double seconds = ViewModel.PreviewSeconds;
-            byte[]? png = await ViewModel.GetPreviewAsync(seconds, ViewModel.ShowsResult && !compare, cancel.Token);
-            byte[]? after = compare ? await ViewModel.GetPreviewAsync(seconds, true, cancel.Token) : null;
+            // 비교 보기의 두 그림은 서로 다른 파일에서 뽑으므로 함께 뽑는다 (차례로 뽑으면 장면을 옮길 때마다 두 배로 기다린다).
+            var first = ViewModel.GetPreviewAsync(seconds, ViewModel.ShowsResult && !compare, cancel.Token);
+            var second = compare ? ViewModel.GetPreviewAsync(seconds, true, cancel.Token) : Task.FromResult<byte[]?>(null);
+            await Task.WhenAll(first, second);
+            byte[]? png = await first;
+            byte[]? after = await second;
             if (cancel.IsCancellationRequested) return;
             if (png is null || png.Length == 0)
             {
@@ -323,15 +329,16 @@ public sealed partial class MainWindow : Window
     {
         var picker = new FileOpenPicker(AppWindow.Id);
         foreach (string extension in VideoExtensions) picker.FileTypeFilter.Add(extension);
-        var file = await picker.PickSingleFileAsync();
-        if (file is not null) await ViewModel.LoadVideoAsync(file.Path);
+        // 여러 개를 한 번에 고를 수 있다 — 고른 영상은 목록에 올라가 차례로 처리된다.
+        var files = await picker.PickMultipleFilesAsync();
+        if (files.Count > 0) await ViewModel.AddVideosAsync([.. files.Select(file => file.Path)]);
     });
 
     private void OnDragOver(object sender, DragEventArgs e)
     {
         if (ViewModel.IsRunning || !e.DataView.Contains(StandardDataFormats.StorageItems)) return;
         e.AcceptedOperation = DataPackageOperation.Copy;
-        e.DragUIOverride.Caption = "이 영상 열기";
+        e.DragUIOverride.Caption = ViewModel.HasVideo ? "목록에 추가" : "영상 열기";
     }
 
     private void OnDrop(object sender, DragEventArgs e)
@@ -343,7 +350,13 @@ public sealed partial class MainWindow : Window
             try
             {
                 var items = await e.DataView.GetStorageItemsAsync();
-                if (items.OfType<StorageFile>().FirstOrDefault() is { } file) await ViewModel.LoadVideoAsync(file.Path);
+                List<string> paths = [.. items.OfType<StorageFile>().Select(file => file.Path).Where(path => path.Length > 0)];
+                // 여럿을 한꺼번에 놓으면 영상만 올린다 (같이 딸려 온 자막·그림마다 "읽지 못했습니다"를 띄우지 않게).
+                // 하나만 놓았으면 확장자가 낯설어도 열어 본다.
+                if (paths.Count > 1)
+                    paths = [.. paths.Where(path => VideoExtensions.Contains(Path.GetExtension(path), StringComparer.OrdinalIgnoreCase))];
+                if (paths.Count > 0) await ViewModel.AddVideosAsync(paths);
+                else ViewModel.ShowInfo("올릴 영상 파일이 없습니다. 영상 파일을 끌어다 놓으세요 (폴더는 올리지 못합니다).");
             }
             finally
             {
@@ -351,6 +364,24 @@ public sealed partial class MainWindow : Window
             }
         });
     }
+
+    // ───────── 영상 목록 ─────────
+
+    private void OnQueueItemClick(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.Tag is QueueItemViewModel item) ViewModel.SelectVideo(item);
+    }
+
+    private void OnQueueRemoveClick(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.Tag is QueueItemViewModel item) ViewModel.RemoveVideo(item);
+    }
+
+    private void OnQueueClearClick(object sender, RoutedEventArgs e) => ViewModel.ClearQueue();
+
+    private void OnQueueResetClick(object sender, RoutedEventArgs e) => ViewModel.ResetQueue();
+
+    private void OnApplyBoxesClick(object sender, RoutedEventArgs e) => ViewModel.ApplyBoxesToOthers();
 
     // ───────── 박스 ─────────
 
@@ -429,7 +460,9 @@ public sealed partial class MainWindow : Window
 
     private static void OpenExplorer(string argument)
     {
-        var info = new ProcessStartInfo("explorer.exe") { UseShellExecute = false };
+        // 이름만 적으면 현재 폴더의 explorer.exe가 먼저 잡힐 수 있다 — Windows 폴더의 것을 전체 경로로 띄운다.
+        string explorer = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "explorer.exe");
+        var info = new ProcessStartInfo(explorer) { UseShellExecute = false };
         info.ArgumentList.Add(argument);
         Process.Start(info)?.Dispose();
     }

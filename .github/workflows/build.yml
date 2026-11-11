@@ -6,6 +6,10 @@ on:
     branches: [ main ]
   pull_request:
 
+# 빌드·테스트만 하므로 저장소를 읽기만 한다.
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: windows-latest

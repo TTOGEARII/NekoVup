@@ -64,7 +64,7 @@ public sealed class ToolRunner : IToolRunner
     {
         cancellationToken.ThrowIfCancellationRequested();
 
-        var startInfo = new ProcessStartInfo(invocation.FileName)
+        var startInfo = new ProcessStartInfo(Locate(invocation.FileName))
         {
             UseShellExecute = false,
             CreateNoWindow = true,
@@ -136,7 +136,7 @@ public sealed class ToolRunner : IToolRunner
     public async Task<byte[]> CaptureBytesAsync(ToolInvocation invocation, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var startInfo = new ProcessStartInfo(invocation.FileName)
+        var startInfo = new ProcessStartInfo(Locate(invocation.FileName))
         {
             UseShellExecute = false,
             CreateNoWindow = true,
@@ -187,6 +187,14 @@ public sealed class ToolRunner : IToolRunner
         }
         return buffer.ToArray();
     }
+
+    /// <summary>
+    /// 이름만 적힌 도구("ffmpeg")는 프로그램 폴더·시스템 폴더·PATH에서만 찾아 전체 경로로 띄운다 —
+    /// 그냥 넘기면 Windows가 현재 폴더(영상을 연 폴더일 수 있다)의 같은 이름 파일을 먼저 실행한다.
+    /// </summary>
+    private static string Locate(string fileName) =>
+        ToolPath.Resolve(fileName)
+        ?? throw new ToolFailedException($"'{fileName}'을(를) 실행할 수 없습니다: 프로그램 폴더와 PATH에서 찾지 못했습니다.");
 
     private static async Task<bool> DrainAsync(Task pumps)
     {

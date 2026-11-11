@@ -94,11 +94,12 @@ public sealed partial class ProPainterSetup(IToolRunner runner, HttpClient http,
                     .Where(d => d.DriveType == DriveType.Fixed && d.IsReady)
                     .OrderByDescending(d => d.AvailableFreeSpace)
                     .FirstOrDefault();
-                if (best is not null) return Path.Combine(best.RootDirectory.FullName, RootFolderName);
+                // 그 이름의 폴더를 이 PC의 다른 사용자가 먼저 만들어 두었으면 "NekoVup-runtime-2"처럼 번호를 붙인 곳에 준비한다.
+                if (best is not null) return FolderTrust.Pick(best.RootDirectory.FullName, RootFolderName);
             }
             catch (IOException) { }
             catch (UnauthorizedAccessException) { }
-            return Path.Combine(Path.GetPathRoot(Environment.SystemDirectory) ?? @"C:\", RootFolderName);
+            return FolderTrust.Pick(Path.GetPathRoot(Environment.SystemDirectory) ?? @"C:\", RootFolderName);
         }
     }
 
@@ -188,7 +189,7 @@ public sealed partial class ProPainterSetup(IToolRunner runner, HttpClient http,
             string root = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(full)!, ".."));
             // 다시 준비하다 끊긴 폴더에는 "끝남" 표시가 없고 "준비 중" 표시만 있다 — 그것도 우리 것이다 (안 그러면 제거 때 수 GB가 남는다).
             bool ours = !IsDriveRoot(root) && full.Equals(PythonExe(root), StringComparison.OrdinalIgnoreCase)
-                && (OwnedFiles.Any(f => File.Exists(Path.Combine(root, f))) || Path.GetFileName(root).Equals(RootFolderName, StringComparison.OrdinalIgnoreCase));
+                && (OwnedFiles.Any(f => File.Exists(Path.Combine(root, f))) || IsRootName(root));
             return ours ? root : null;
         }
         catch (ArgumentException) { return null; }
@@ -204,20 +205,24 @@ public sealed partial class ProPainterSetup(IToolRunner runner, HttpClient http,
     /// <summary>
     /// 우리가 만든 runtime인지: 표시 파일(끝남 <see cref="MarkerFileName"/> 또는 준비 중 <see cref="SetupMarkerFileName"/>)이 있거나,
     /// 우리 이름(<see cref="RootFolderName"/>)의 폴더에 우리가 만든 것만 들어 있어야 한다 (준비가 끊겨 표시 파일이 없는 것도 포함).
-    /// 사용자가 직접 깐 ProPainter venv는 어느 쪽도 아니다.
+    /// 사용자가 직접 깐 ProPainter venv는 어느 쪽도 아니다. 이 PC의 다른 사용자가 만든 폴더도 아니다 (<see cref="FolderTrust"/>) —
+    /// 표시 파일까지 흉내 낸 폴더의 파이썬을 실행하면 안 되고, 제거할 때 남의 환경을 지워도 안 된다.
     /// </summary>
     public static bool IsOurRuntime(string root)
     {
         try
         {
-            if (!Directory.Exists(root) || IsDriveRoot(Path.GetFullPath(root))) return false;
+            if (!Directory.Exists(root) || IsDriveRoot(Path.GetFullPath(root)) || !FolderTrust.IsTrusted(root)) return false;
             if (OwnedFiles.Any(f => File.Exists(Path.Combine(root, f)))) return true;
-            return Path.GetFileName(Path.TrimEndingDirectorySeparator(root)).Equals(RootFolderName, StringComparison.OrdinalIgnoreCase)
-                && Directory.EnumerateFileSystemEntries(root).Any() && HasOnlyOwnedEntries(root);
+            return IsRootName(root) && Directory.EnumerateFileSystemEntries(root).Any() && HasOnlyOwnedEntries(root);
         }
         catch (IOException) { return false; }
         catch (UnauthorizedAccessException) { return false; }
     }
+
+    /// <summary>폴더 이름이 우리 것(<see cref="RootFolderName"/>, 또는 번호가 붙은 "NekoVup-runtime-2")인지.</summary>
+    private static bool IsRootName(string root) =>
+        FolderTrust.IsNameOrNumbered(Path.GetFileName(Path.TrimEndingDirectorySeparator(root)), RootFolderName);
 
     /// <summary>폴더 바로 아래에 우리가 만드는 것(<see cref="OwnedDirectories"/>, <see cref="OwnedFiles"/>) 말고는 없는지. 빈 폴더·없는 폴더도 참.</summary>
     public static bool HasOnlyOwnedEntries(string root)
@@ -239,21 +244,25 @@ public sealed partial class ProPainterSetup(IToolRunner runner, HttpClient http,
     /// </summary>
     public static string ResolveRoot(AppSettings settings)
     {
-        if (RootOf(settings) is { } configured && Directory.Exists(configured)) return configured;
+        if (RootOf(settings) is { } configured && Directory.Exists(configured) && FolderTrust.IsTrusted(configured)) return configured;
         foreach (var root in CandidateRoots())
             if (IsOurRuntime(root)) return root;
         return DefaultRoot;
     }
 
-    /// <summary>모든 고정 드라이브의 <c>X:\NekoVup-runtime</c>.</summary>
+    /// <summary>모든 고정 드라이브의 <c>X:\NekoVup-runtime</c> (+ 번호를 붙여 만든 것이 있으면 그것도).</summary>
     public static IEnumerable<string> CandidateRoots()
     {
         var roots = new List<string>();
         try
         {
             foreach (var drive in DriveInfo.GetDrives())
-                if (drive.DriveType == DriveType.Fixed && drive.IsReady)
-                    roots.Add(Path.Combine(drive.RootDirectory.FullName, RootFolderName));
+            {
+                if (drive.DriveType != DriveType.Fixed || !drive.IsReady) continue;
+                string first = Path.Combine(drive.RootDirectory.FullName, RootFolderName);
+                roots.Add(first);
+                roots.AddRange(FolderTrust.Existing(drive.RootDirectory.FullName, RootFolderName).Where(r => !r.Equals(first, StringComparison.OrdinalIgnoreCase)));
+            }
         }
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
@@ -287,7 +296,10 @@ public sealed partial class ProPainterSetup(IToolRunner runner, HttpClient http,
         string trimmed = Path.TrimEndingDirectorySeparator(root);
         if (IsDriveRoot(root))
             throw new JobException($"드라이브 바로 아래에는 준비할 수 없습니다. 폴더를 지정하세요 (예: {Path.Combine(root, RootFolderName)}).");
-        if (Path.GetFileName(trimmed).Equals(RootFolderName, StringComparison.OrdinalIgnoreCase) || IsOurRuntime(root)) return;
+        // 이 PC의 다른 사용자가 만든 폴더에는 준비하지 않는다 — 그 사용자가 안의 파이썬을 바꿔 놓을 수 있다.
+        if (!FolderTrust.IsTrusted(root))
+            throw new JobException($"이 PC의 다른 사용자가 만든 폴더라 쓸 수 없습니다: {root} — 다른 폴더를 지정하세요.");
+        if (IsRootName(trimmed) || IsOurRuntime(root)) return;
         if (Directory.Exists(root) && Directory.EnumerateFileSystemEntries(root).Any())
             throw new JobException($"다른 파일이 들어 있는 폴더입니다. 비어 있는 폴더를 지정하세요: {root}");
     }
@@ -519,10 +531,13 @@ public sealed partial class ProPainterSetup(IToolRunner runner, HttpClient http,
 
     // ───────────────────────── 내려받기 ─────────────────────────
 
-    /// <summary>이미 받아 둔 파일이 해시까지 맞으면 그대로 쓴다. 해시가 비어 있으면 크기만 본다.</summary>
+    /// <summary>
+    /// 이미 받아 둔 파일이 해시까지 맞으면 그대로 쓴다. 해시가 없는 파일(ProPainter 소스 zip)은 받아 둔 것을 믿을 방법이 없으므로
+    /// 매번 새로 받는다 — 내려받기 폴더에 누가 같은 이름의 파일을 놓아 두어도 그것을 풀어 실행하지 않게.
+    /// </summary>
     private async Task<string> DownloadAsync(Uri url, string path, string sha256, Reporter report, CancellationToken cancellationToken)
     {
-        if (File.Exists(path) && (sha256.Length == 0 || Matches(path, sha256)))
+        if (sha256.Length > 0 && File.Exists(path) && Matches(path, sha256))
         {
             log.Detail("이미 있음: " + Path.GetFileName(path));
             return path;

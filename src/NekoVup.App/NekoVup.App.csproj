@@ -7,7 +7,7 @@
     <RootNamespace>NekoVup.App</RootNamespace>
     <AssemblyName>NekoVup</AssemblyName>
     <!-- 릴리스 태그(vX.Y.Z)와 맞춘다. 배포 워크플로는 태그에서 읽은 값으로 덮어쓴다. -->
-    <Version>1.0.2</Version>
+    <Version>1.1.0</Version>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>app.ico</ApplicationIcon>
     <Platforms>x64</Platforms>

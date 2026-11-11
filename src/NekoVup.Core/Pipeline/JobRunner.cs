@@ -238,6 +238,9 @@ public sealed class JobRunner(AppSettings configured, IToolRunner runner, IJobLo
         // 준비는 끝났는데 드라이브를 뽑아 둔 것일 수 있다 — "다시 준비하라"고 하면 다른 드라이브에 3 GB를 또 받는다.
         if (!Directory.Exists(root))
             throw new JobException($"ProPainter 파이썬 환경 폴더를 찾을 수 없습니다: {root} — 외장 드라이브에 있다면 연결한 뒤 다시 시작하세요. 지웠다면 설정 → 도구에서 [ProPainter 자동 준비]를 누르세요 (명령줄은 setup).");
+        // 드라이브 바로 아래의 폴더는 이 PC의 다른 사용자도 만들 수 있다 — 남이 만든 폴더의 파이썬은 실행하지 않는다.
+        if (!FolderTrust.IsTrusted(root))
+            throw new JobException($"ProPainter 파이썬 환경 폴더를 이 PC의 다른 사용자가 만들어 쓰지 않습니다: {root} — 설정 → 도구에서 [ProPainter 자동 준비]를 누르면 새 폴더에 준비합니다 (명령줄은 setup).");
         FileStream? hold = null;
         try
         {
@@ -352,14 +355,20 @@ public sealed class JobRunner(AppSettings configured, IToolRunner runner, IJobLo
         string key = JobManifest.ComputeKey(request);
         string work = JobWorkDirectory(request, key);
         string workRoot = Path.GetDirectoryName(work)!;
+        bool fallback = string.IsNullOrEmpty(request.WorkDirectory) && WorkFolders.IsFallbackName(Path.GetFileName(workRoot));
+        if (fallback)
+        {
+            // 드라이브 바로 아래의 폴더는 이 PC의 다른 사용자도 열어 볼 수 있다 — 중간 프레임은 나만 보게 한다.
+            Directory.CreateDirectory(workRoot);
+            FolderTrust.MakePrivate(workRoot);
+        }
         Directory.CreateDirectory(work);
         // 작업이 끝나지 못하면 이 폴더가 남는다. 프로그램을 제거할 때 지울 수 있게 어디에 만들었는지 적어 둔다.
         // 사용자가 직접 정한 폴더는 적지 않는다 — 제거할 때 통째로 지우면 안 되는 폴더다.
         if (string.IsNullOrEmpty(request.WorkDirectory))
         {
             WorkFolders.Remember(workRoot);
-            if (Path.GetFileName(workRoot).Equals(WorkFolders.FallbackFolderName, StringComparison.OrdinalIgnoreCase))
-                _log.Info($"출력 폴더가 OneDrive 안이라, 중간 파일은 동기화되지 않게 {workRoot}에 둡니다.");
+            if (fallback) _log.Info($"출력 폴더가 OneDrive 안이라, 중간 파일은 동기화되지 않게 {workRoot}에 둡니다.");
         }
 
         int frames;
@@ -898,8 +907,9 @@ public sealed class JobRunner(AppSettings configured, IToolRunner runner, IJobLo
                 : "모델 내려받는 중"), _log.Info, cancellationToken).ConfigureAwait(false);
 
         var cleanedInfo = await ProbeAsync(cleaned, cancellationToken).ConfigureAwait(false);
+        // 스크립트가 ffmpeg를 직접 띄운다 — 이름만 넘기면 현재 폴더의 같은 이름 파일이 실행될 수 있어 전체 경로로 넘긴다.
         var invocation = new ToolInvocation(settings.Python,
-            RealBasicVsr.Arguments(settings.Ffmpeg, cleaned, temp, cleanedInfo.Width, cleanedInfo.Height, frames, cleanedInfo.Fps, encode,
+            RealBasicVsr.Arguments(ToolPath.ResolveOrSame(settings.Ffmpeg), cleaned, temp, cleanedInfo.Width, cleanedInfo.Height, frames, cleanedInfo.Fps, encode,
                 cleanedInfo.ColorSpace, cleanedInfo.ColorRange))
         {
             Environment = Runtime.ProPainterSetup.PythonEnvironment,

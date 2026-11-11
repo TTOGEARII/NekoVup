@@ -52,13 +52,24 @@ public sealed partial class BoxViewModel : ObservableObject
     /// <summary>맞춰 둔 자리의 수. 자리가 바뀔 때마다(수가 같아도) 바뀌었다고 알린다 — 처리 영역을 다시 잡게.</summary>
     public int KeyCount => _keys.Count;
 
+    /// <summary>
+    /// <see cref="Set"/>으로 자리를 옮긴 뒤 한 번 알릴 때 쓰는 이름. X·Y·너비·높이가 하나씩 바뀔 때마다 처리 영역을 다시 잡으면
+    /// 박스를 끄는 동안 같은 계산을 네 번씩 한다 — 넣는 동안(<see cref="Setting"/>)은 건너뛰고 이것 하나로 받는다.
+    /// </summary>
+    public const string PlacedProperty = "Placed";
+
+    /// <summary><see cref="Set"/>이 값을 차례로 넣는 중.</summary>
+    public bool Setting { get; private set; }
+
     public void Set(PixelRect rect)
     {
-        bool quiet = _quiet;
-        _quiet = true;
+        var before = (X, Y, Width, Height);
+        bool quiet = _quiet, setting = Setting;
+        (_quiet, Setting) = (true, true);
         (X, Y, Width, Height) = (rect.X, rect.Y, rect.Width, rect.Height);
-        _quiet = quiet;
+        (_quiet, Setting) = (quiet, setting);
         Record();
+        if (!Setting && before != (X, Y, Width, Height)) OnPropertyChanged(PlacedProperty);
     }
 
     /// <summary>

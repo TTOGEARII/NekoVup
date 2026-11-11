@@ -18,7 +18,7 @@ $root = Resolve-Path (Join-Path $PSScriptRoot '..')
 if (-not $Version) {
     $Version = ([xml](Get-Content (Join-Path $root 'src\NekoVup.App\NekoVup.App.csproj') -Encoding UTF8)).Project.PropertyGroup.Version | Where-Object { $_ } | Select-Object -First 1
 }
-if ($Version -notmatch '^\d+\.\d+\.\d+') { throw "버전을 알 수 없습니다: '$Version'" }
+if ($Version -notmatch '^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$') { throw "버전을 알 수 없습니다: '$Version'" }
 
 $publish = Join-Path $root 'publish\app'
 if (Test-Path $publish) { Remove-Item $publish -Recurse -Force }

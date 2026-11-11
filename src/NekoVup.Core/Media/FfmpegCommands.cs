@@ -290,10 +290,13 @@ public static class FfmpegCommands
         return string.Create(CultureInfo.InvariantCulture, $"cas=strength={strength:0.00}");
     }
 
-    /// <summary>미리보기용: T초 지점의 프레임 한 장을 PNG로 표준 출력에 쓴다.</summary>
+    /// <summary>
+    /// 미리보기용: T초 지점의 프레임 한 장을 PNG로 표준 출력에 쓴다. 파일로 남기지 않고 바로 화면에 그리므로 압축은 가장 가볍게 한다
+    /// (기본 압축은 큰 화면에서 한 장에 수백 ms가 걸려 타임라인을 끌 때 굼뜨다. 무손실이라 그림은 같다).
+    /// </summary>
     public static List<string> PreviewFrame(string inputPath, double seconds) =>
         ["-hide_banner", "-nostdin", "-loglevel", "error", "-ss", Seconds(seconds), "-i", inputPath,
-         "-frames:v", "1", "-f", "image2pipe", "-vcodec", "png", "-"];
+         "-frames:v", "1", "-f", "image2pipe", "-vcodec", "png", "-compression_level", "1", "-"];
 
     /// <summary>파일의 영상 프레임(패킷) 수를 세는 ffprobe 인자. 디코딩하지 않아 빠르다.</summary>
     public static List<string> CountFrames(string path) =>

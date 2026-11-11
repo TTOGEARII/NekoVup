@@ -111,7 +111,8 @@
                         IsEnabled="{x:Bind ViewModel.CanStart, Mode=OneWay}">
                     <StackPanel Orientation="Horizontal" Spacing="8">
                         <FontIcon Glyph="&#xE768;" FontSize="14" />
-                        <TextBlock Text="시작" FontWeight="SemiBold" FontSize="14" />
+                        <!-- 목록의 영상을 차례로 처리할 때는 "시작 (3개)" -->
+                        <TextBlock Text="{x:Bind ViewModel.StartText, Mode=OneWay}" FontWeight="SemiBold" FontSize="14" />
                     </StackPanel>
                 </Button>
                 <Button AutomationProperties.Name="중지" Click="OnCancelClick" VerticalAlignment="Stretch" Padding="16,0"
@@ -136,6 +137,7 @@
                         <TextBlock Text="영상 파일을 여기에 끌어다 놓으세요" FontSize="16" FontWeight="SemiBold" Margin="0,18,0,0"
                                    HorizontalAlignment="Center" Foreground="{ThemeResource NekoText}" />
                         <TextBlock Text="mp4 · mkv · mov · avi · webm" Style="{StaticResource HintText}" Margin="0,6,0,0" HorizontalAlignment="Center" />
+                        <TextBlock Text="여러 개를 올리면 목록에 담아 차례로 처리합니다" Style="{StaticResource HintText}" Margin="0,2,0,0" HorizontalAlignment="Center" />
                         <Button Click="OnOpenClick" Margin="0,18,0,0" Padding="16,7" HorizontalAlignment="Center" AutomationProperties.Name="파일 고르기">
                             <StackPanel Orientation="Horizontal" Spacing="8">
                                 <FontIcon Glyph="&#xE8E5;" FontSize="14" />
@@ -146,14 +148,92 @@
                 </Grid>
             </Border>
 
-            <!-- 영상을 열었을 때: 왼쪽 뷰어 + 타임라인, 오른쪽 옵션 -->
-            <Grid ColumnSpacing="8" Visibility="{x:Bind ViewModel.HasVideo, Mode=OneWay}">
+            <!-- 영상을 열었을 때: (영상 목록) + 가운데 뷰어·타임라인 + 오른쪽 옵션.
+                 목록은 둘 이상 올렸을 때만 보인다 — 감춘 열에 간격이 남지 않게 열 간격 대신 여백을 쓴다. -->
+            <Grid Visibility="{x:Bind ViewModel.HasVideo, Mode=OneWay}">
                 <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="388" />
+                    <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
 
-                <Grid RowSpacing="8">
+                <!-- 영상 목록 -->
+                <Border Style="{StaticResource Panel}" Width="236" Margin="0,0,8,0" Visibility="{x:Bind ViewModel.ShowQueue, Mode=OneWay}">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+                        <Border Style="{StaticResource PanelHeader}" Padding="10,0,4,0">
+                            <Grid>
+                                <TextBlock Style="{StaticResource PanelTitle}" Text="{x:Bind ViewModel.QueueTitle, Mode=OneWay}" />
+                                <Button Style="{StaticResource ToolButton}" HorizontalAlignment="Right" Padding="8,2" FontSize="12" Click="OnOpenClick"
+                                        IsEnabled="{x:Bind ViewModel.NotRunning, Mode=OneWay}"
+                                        AutomationProperties.Name="목록에 영상 추가" ToolTipService.ToolTip="영상을 더 올립니다 (창에 끌어다 놓아도 됩니다)">
+                                    <StackPanel Orientation="Horizontal" Spacing="5">
+                                        <FontIcon Glyph="&#xE710;" FontSize="10" />
+                                        <TextBlock Text="추가" />
+                                    </StackPanel>
+                                </Button>
+                            </Grid>
+                        </Border>
+                        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+                            <ItemsRepeater ItemsSource="{x:Bind ViewModel.Queue}" Margin="0,4">
+                                <ItemsRepeater.Layout>
+                                    <StackLayout Spacing="0" />
+                                </ItemsRepeater.Layout>
+                                <ItemsRepeater.ItemTemplate>
+                                    <DataTemplate x:DataType="vm:QueueItemViewModel">
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <!-- 누르면 그 영상을 연다. 누른 영상은 Tag로 알린다 (ItemsRepeater는 DataContext를 넣어 주지 않는다) -->
+                                            <Button Style="{StaticResource ToolButton}" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch"
+                                                    Padding="0" CornerRadius="0" Tag="{x:Bind}" Click="OnQueueItemClick"
+                                                    AutomationProperties.Name="{x:Bind Name}" ToolTipService.ToolTip="{x:Bind Tip, Mode=OneWay}">
+                                                <Grid ColumnSpacing="7">
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="3" />
+                                                        <ColumnDefinition Width="*" />
+                                                    </Grid.ColumnDefinitions>
+                                                    <Rectangle Fill="{ThemeResource NekoAccent}" Visibility="{x:Bind IsCurrent, Mode=OneWay}" />
+                                                    <StackPanel Grid.Column="1" Padding="0,5,4,6">
+                                                        <TextBlock Text="{x:Bind Name}" FontSize="12.5" TextTrimming="CharacterEllipsis" Foreground="{ThemeResource NekoText}" />
+                                                        <TextBlock Text="{x:Bind StatusLine, Mode=OneWay}" FontSize="11.5" Foreground="{ThemeResource NekoHint}" />
+                                                    </StackPanel>
+                                                </Grid>
+                                            </Button>
+                                            <Button Grid.Column="1" Style="{StaticResource ToolButton}" Padding="7" VerticalAlignment="Center" Margin="0,0,2,0"
+                                                    Tag="{x:Bind}" Click="OnQueueRemoveClick"
+                                                    AutomationProperties.Name="목록에서 빼기" ToolTipService.ToolTip="목록에서 뺍니다 (파일은 지우지 않습니다)">
+                                                <FontIcon Glyph="&#xE711;" FontSize="10" />
+                                            </Button>
+                                        </Grid>
+                                    </DataTemplate>
+                                </ItemsRepeater.ItemTemplate>
+                            </ItemsRepeater>
+                        </ScrollViewer>
+                        <Border Grid.Row="2" BorderBrush="{ThemeResource NekoStroke}" BorderThickness="0,1,0,0" Padding="10,8">
+                            <StackPanel Spacing="6">
+                                <TextBlock Style="{StaticResource HintText}"
+                                           Text="[시작]을 누르면 위에서부터 차례로 처리합니다. 워터마크 위치·구간·출력 파일은 영상마다 따로 정하고, 그 밖의 옵션은 함께 씁니다." />
+                                <StackPanel Orientation="Horizontal" Spacing="6">
+                                    <Button Content="모두 대기로" FontSize="12" Padding="8,3" Click="OnQueueResetClick"
+                                            IsEnabled="{x:Bind ViewModel.CanEditQueue, Mode=OneWay}"
+                                            ToolTipService.ToolTip="끝난 영상도 다시 처리하도록 모두 '대기'로 돌립니다" />
+                                    <Button Content="비우기" FontSize="12" Padding="8,3" Click="OnQueueClearClick"
+                                            IsEnabled="{x:Bind ViewModel.CanEditQueue, Mode=OneWay}"
+                                            AutomationProperties.Name="목록 비우기" ToolTipService.ToolTip="목록을 모두 비웁니다 (파일은 지우지 않습니다)" />
+                                </StackPanel>
+                            </StackPanel>
+                        </Border>
+                    </Grid>
+                </Border>
+
+                <Grid Grid.Column="1" RowSpacing="8">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="*" />
                         <RowDefinition Height="Auto" />
@@ -236,7 +316,7 @@
                 </Grid>
 
                 <!-- 옵션 -->
-                <Border Grid.Column="1" Style="{StaticResource Panel}">
+                <Border Grid.Column="2" Style="{StaticResource Panel}" Width="388" Margin="8,0,0,0">
                     <Grid>
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto" />
@@ -339,6 +419,10 @@
                                         <TextBlock Text="{x:Bind ViewModel.RegionWarning, Mode=OneWay}" FontSize="11.5" TextWrapping="Wrap"
                                                    Foreground="{ThemeResource NekoWarnText}" />
                                     </Border>
+                                    <!-- 같은 워터마크가 찍힌 영상 묶음: 한 영상에서 맞춘 박스를 나머지에도 넣는다 -->
+                                    <Button Content="이 박스를 다른 영상에도 넣기" FontSize="12" Padding="8,3" Click="OnApplyBoxesClick"
+                                            Visibility="{x:Bind ViewModel.ShowQueue, Mode=OneWay}"
+                                            ToolTipService.ToolTip="목록의 다른 영상에 이 영상의 박스를 넣습니다 (그 영상에 있던 박스는 바뀝니다). 화면 크기가 다른 영상은 건너뜁니다." />
                                 </StackPanel>
 
                                 <!-- 업스케일 -->
@@ -470,7 +554,11 @@
                             <ColumnDefinition Width="*" />
                             <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
-                        <TextBlock Style="{StaticResource PanelTitle}" Text="작업 진행" />
+                        <StackPanel Orientation="Horizontal" Spacing="10">
+                            <TextBlock Style="{StaticResource PanelTitle}" Text="작업 진행" />
+                            <!-- 여럿을 차례로 처리할 때: "영상 2/5" -->
+                            <TextBlock Text="{x:Bind ViewModel.BatchText, Mode=OneWay}" FontSize="12" Foreground="{ThemeResource NekoText}" VerticalAlignment="Center" />
+                        </StackPanel>
                         <TextBlock Grid.Column="1" Text="{x:Bind ViewModel.StageText, Mode=OneWay}" FontSize="12" FontWeight="SemiBold"
                                    Foreground="{ThemeResource NekoAccent}" VerticalAlignment="Center" />
                         <TextBlock Grid.Column="2" Text="{x:Bind ViewModel.DetailText, Mode=OneWay}" FontSize="12" Foreground="{ThemeResource NekoHint}"
@@ -531,11 +619,12 @@
                             <TextBlock Text="설정" />
                         </StackPanel>
                     </Button>
-                    <Button Style="{StaticResource ToolButton}" AutomationProperties.Name="영상 열기" Click="OnOpenClick"
-                            IsEnabled="{x:Bind ViewModel.NotRunning, Mode=OneWay}">
+                    <Button Style="{StaticResource ToolButton}" AutomationProperties.Name="영상 추가" Click="OnOpenClick"
+                            IsEnabled="{x:Bind ViewModel.NotRunning, Mode=OneWay}"
+                            ToolTipService.ToolTip="영상을 올립니다. 여러 개를 고르면 목록에 담아 차례로 처리합니다.">
                         <StackPanel Orientation="Horizontal" Spacing="7">
                             <FontIcon Glyph="&#xE8E5;" FontSize="13" />
-                            <TextBlock Text="영상 열기" />
+                            <TextBlock Text="영상 추가" />
                         </StackPanel>
                     </Button>
                     <Button Style="{StaticResource ToolButton}" AutomationProperties.Name="결과 폴더" Click="OnOpenFolderClick">

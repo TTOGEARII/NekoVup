@@ -22,13 +22,17 @@ public static class WorkFolders
 
     internal static string FallbackRoot(string? jobFolderName, IReadOnlyList<string> driveRoots, Func<string, long> freeSpace)
     {
-        string At(string drive) => Path.Combine(drive, FallbackFolderName);
+        // 그 이름의 폴더를 이 PC의 다른 사용자가 만들어 두었으면 "NekoVup-work-2"처럼 번호를 붙인 곳을 쓴다 (FolderTrust).
+        string At(string drive) => FolderTrust.Pick(drive, FallbackFolderName);
         return (jobFolderName is { Length: > 0 } ? driveRoots.Select(At).FirstOrDefault(root => Directory.Exists(Path.Combine(root, jobFolderName))) : null)
             ?? driveRoots.Select(At).FirstOrDefault(Directory.Exists)
             ?? driveRoots.Where(drive => Directory.Exists(Path.Combine(drive, ProPainterSetup.RootFolderName))).Select(At).FirstOrDefault()
             ?? driveRoots.OrderByDescending(freeSpace).Select(At).FirstOrDefault()
             ?? At(Path.GetPathRoot(Environment.SystemDirectory) ?? @"C:\");
     }
+
+    /// <summary>폴더 이름이 <see cref="FallbackFolderName"/>(또는 번호가 붙은 "NekoVup-work-2")인지.</summary>
+    public static bool IsFallbackName(string folderName) => FolderTrust.IsNameOrNumbered(folderName, FallbackFolderName);
 
     private static List<string> FixedDriveRoots()
     {
@@ -108,7 +112,7 @@ public static class WorkFolders
         {
             string name = Path.GetFileName(Path.TrimEndingDirectorySeparator(folder));
             return Path.IsPathFullyQualified(folder)
-                && (name.Equals(FolderName, StringComparison.OrdinalIgnoreCase) || name.Equals(FallbackFolderName, StringComparison.OrdinalIgnoreCase))
+                && (name.Equals(FolderName, StringComparison.OrdinalIgnoreCase) || IsFallbackName(name))
                 && Directory.Exists(folder)
                 && !Directory.EnumerateFiles(folder).Any();
         }

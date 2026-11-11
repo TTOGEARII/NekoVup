@@ -45,6 +45,7 @@ public sealed partial class MainViewModel : ObservableObject
         IsDark = Settings.Theme != "Light";
         LoadSettingsIntoEditor();
         Boxes.CollectionChanged += OnBoxesCollectionChanged;
+        Queue.CollectionChanged += (_, _) => RefreshQueueTexts();
     }
 
     public AppSettings Settings { get; private set; }
@@ -52,6 +53,10 @@ public sealed partial class MainViewModel : ObservableObject
     public MediaInfo? Info { get; private set; }
 
     public ObservableCollection<BoxViewModel> Boxes { get; } = [];
+
+    /// <summary>올려 둔 영상들. 시작을 누르면 위에서부터 차례로 처리한다 (사용자 요청).</summary>
+    public ObservableCollection<QueueItemViewModel> Queue { get; } = [];
+
     public ObservableCollection<string> Log { get; } = [];
     public ObservableCollection<CheckItemViewModel> CheckItems { get; } = [];
 
@@ -182,8 +187,11 @@ public sealed partial class MainViewModel : ObservableObject
     }
 
     /// <summary>재생 헤드가 가리키는 프레임 (원본 기준).</summary>
-    private long PlayheadFrame(MediaInfo info) =>
-        Math.Min(FrameGrid.FrameAt(PreviewSeconds, info.Fps.Value), Math.Max(0, info.EstimateFrames() - 1));
+    private long PlayheadFrame(MediaInfo info) => FrameAt(info, PreviewSeconds);
+
+    /// <summary>그 시각의 프레임 (영상의 마지막 프레임을 넘지 않게).</summary>
+    private static long FrameAt(MediaInfo info, double seconds) =>
+        Math.Min(FrameGrid.FrameAt(seconds, info.Fps.Value), Math.Max(0, info.EstimateFrames() - 1));
 
     // ───────── 옵션 ─────────
 
@@ -446,6 +454,7 @@ public sealed partial class MainViewModel : ObservableObject
     [NotifyPropertyChangedFor(nameof(NotRunning))]
     [NotifyPropertyChangedFor(nameof(CanStart))]
     [NotifyPropertyChangedFor(nameof(RangeEditable))]
+    [NotifyPropertyChangedFor(nameof(CanEditQueue))]
     public partial bool IsRunning { get; set; }
 
     public bool NotRunning => !IsRunning;
@@ -477,6 +486,10 @@ public sealed partial class MainViewModel : ObservableObject
     public partial bool HasResult { get; set; }
 
     public string? ResultPath { get; private set; }
+
+    /// <summary>여러 영상을 차례로 처리할 때 지금 몇 번째인지 ("영상 2/5"). 하나만 처리할 때는 비어 있다.</summary>
+    [ObservableProperty]
+    public partial string BatchText { get; set; } = "";
 
     /// <summary>아래 줄 오른쪽에 보여 주는 한 줄 상태.</summary>
     [ObservableProperty]
@@ -533,92 +546,367 @@ public sealed partial class MainViewModel : ObservableObject
 
     // ═════════════════════ 영상 열기 ═════════════════════
 
-    private int _loadSerial;
+    /// <summary>지금 화면에 열려 있는 영상 (목록의 하나).</summary>
+    private QueueItemViewModel? _current;
 
-    public async Task LoadVideoAsync(string path)
+    /// <summary>읽으려고 줄 세워 둔 파일들. 읽는 동안 또 끌어다 놓으면 뒤에 붙는다.</summary>
+    private readonly System.Collections.Generic.Queue<string> _pendingPaths = new();
+
+    /// <summary>다른 영상으로 바꾸는 중 — 값을 하나씩 옮기는 동안에는 따라 나오는 표시를 다시 계산하지 않는다 (끝에 한 번만).</summary>
+    private bool _selecting;
+
+    /// <summary>영상 정보를 읽어 목록에 넣는 중 (그동안은 시작하지 못한다).</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(CanStart))]
+    [NotifyPropertyChangedFor(nameof(CanEditQueue))]
+    public partial bool IsAdding { get; set; }
+
+    /// <summary>목록을 고칠 수 있는지 (처리하는 동안과 영상 정보를 읽는 동안은 못 고친다).</summary>
+    public bool CanEditQueue => !IsRunning && !IsAdding;
+
+    /// <summary>영상 목록을 보일지 — 둘 이상 올렸을 때만. 하나만 다룰 때는 목록 없이 넓게 쓴다.</summary>
+    public bool ShowQueue => Queue.Count > 1;
+
+    public string QueueTitle => string.Create(CultureInfo.InvariantCulture, $"영상 목록 ({Queue.Count})");
+
+    /// <summary>시작 단추의 글. 목록의 영상을 차례로 처리할 때는 몇 개인지 적는다.</summary>
+    public string StartText => Queue.Count > 1 && Queue.Count(item => item.State != QueueState.Done) is > 0 and var count
+        ? string.Create(CultureInfo.InvariantCulture, $"시작 ({count}개)")
+        : "시작";
+
+    /// <summary>
+    /// 시작을 누르면 처리할 영상들. 목록에 아직 끝나지 않은 것(대기·실패·취소)이 있으면 그것들을 위에서부터 차례로,
+    /// 모두 끝났거나 영상이 하나뿐이면 지금 보는 영상을 (다시) 처리한다.
+    /// </summary>
+    private List<QueueItemViewModel> StartTargets()
     {
-        if (IsRunning) return;
+        if (_current is null) return [];
+        List<QueueItemViewModel> pending = Queue.Count > 1 ? [.. Queue.Where(item => item.State != QueueState.Done)] : [];
+        return pending.Count > 0 ? pending : [_current];
+    }
+
+    private void RefreshQueueTexts()
+    {
+        OnPropertyChanged(nameof(ShowQueue));
+        OnPropertyChanged(nameof(QueueTitle));
+        OnPropertyChanged(nameof(StartText));
+    }
+
+    /// <summary>
+    /// 영상을 목록에 올린다 (파일 고르기, 끌어다 놓기, 명령줄). 이미 올린 파일은 다시 올리지 않는다.
+    /// 처음 올린 것(이미 있던 파일이면 그것)을 화면에 연다.
+    /// </summary>
+    public async Task AddVideosAsync(IReadOnlyList<string> paths)
+    {
+        if (IsRunning)
+        {
+            // 끌어다 놓기는 처리하는 동안에도 들어온다 — 아무 일도 없으면 놓친 줄 안다.
+            if (paths.Count > 0) ShowInfo("처리하는 동안에는 영상을 더 올릴 수 없습니다. 끝난 뒤나 [중지]를 누른 뒤에 올리세요.");
+            return;
+        }
+        foreach (string path in paths) _pendingPaths.Enqueue(path);
+        // 읽는 동안 또 올리면 읽고 있는 쪽이 이어서 읽는다.
+        if (IsAdding || _pendingPaths.Count == 0) return;
         ClearMessage();
-        // 읽는 동안 다른 영상을 또 열거나 작업을 시작할 수 있다 — 마지막으로 연 것만 반영한다.
-        int serial = ++_loadSerial;
+        IsAdding = true;
+        QueueItemViewModel? first = null;
+        var problems = new List<string>();
         try
         {
-            // 명령줄로 받은 상대 경로도 전체 경로로 바꿔 둔다 (출력 경로를 입력 폴더 기준으로 풀기 때문).
-            try
+            var prober = new JobRunner(Settings, _runner, NullJobLog.Instance);
+            while (_pendingPaths.TryDequeue(out string? path))
             {
-                path = Path.GetFullPath(path);
+                try
+                {
+                    // 명령줄로 받은 상대 경로도 전체 경로로 바꿔 둔다 (출력 경로를 입력 폴더 기준으로 풀기 때문).
+                    try
+                    {
+                        path = Path.GetFullPath(path);
+                    }
+                    catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+                    {
+                        throw new JobException($"입력 파일 경로가 올바르지 않습니다: {path}", ex);
+                    }
+                    if (Queue.FirstOrDefault(item => FileLinker.SameFile(item.Path, path)) is { } existing)
+                    {
+                        first ??= existing;
+                        continue;
+                    }
+                    StatusText = "영상 정보 읽는 중 · " + Path.GetFileName(path);
+                    var info = await prober.ProbeAsync(path, CancellationToken.None);
+                    var added = new QueueItemViewModel(info, DescribeInfo(info), DefaultOutput(info));
+                    Queue.Add(added);
+                    first ??= added;
+                }
+                catch (JobException ex)
+                {
+                    problems.Add(ex.Message);
+                }
+                catch (ToolFailedException ex)
+                {
+                    // ffprobe를 띄우지 못하면 나머지도 마찬가지다 — 같은 알림을 파일 수만큼 쌓지 않는다.
+                    problems.Add("ffprobe를 실행하지 못했습니다. 환경 설정에서 FFmpeg 위치를 확인하세요.\n" + FirstLine(ex.Message));
+                    _pendingPaths.Clear();
+                }
             }
-            catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
-            {
-                throw new JobException($"입력 파일 경로가 올바르지 않습니다: {path}", ex);
-            }
-            var info = await new JobRunner(Settings, _runner, NullJobLog.Instance).ProbeAsync(path, CancellationToken.None);
-            if (serial != _loadSerial || IsRunning) return;
+        }
+        finally
+        {
+            _pendingPaths.Clear(); // 예상하지 못한 오류로 나왔을 때 남은 것이 다음에 올릴 때 딸려 오지 않게
+            IsAdding = false;
+            StatusText = "준비됨";
+        }
+        if (first is not null) Select(first);
+        if (problems.Count > 0)
+        {
+            const int Shown = 3;
+            string more = problems.Count > Shown ? $"\n… 외 {problems.Count - Shown}개" : "";
+            ShowError(string.Join("\n", problems.Take(Shown)) + more);
+        }
+    }
+
+    /// <summary>영상 이름 아래에 보이는 한 줄 (크기, 프레임 속도, 길이, 코덱).</summary>
+    private static string DescribeInfo(MediaInfo info)
+    {
+        string aspect = info.SampleAspectRatio is { Num: var n, Den: var d } && n != d
+            ? string.Create(CultureInfo.InvariantCulture, $" (화면비 {info.DisplayAspect:0.00}:1)")
+            : "";
+        string subtitles = info.SubtitleCodecs.Count > 0 ? $" · 자막 {info.SubtitleCodecs.Count}개" : "";
+        string audio = info.HasAudio ? string.Join(", ", info.AudioCodecs) : "없음";
+        string interlaced = info.IsInterlaced ? " · 인터레이스" : "";
+        return string.Create(CultureInfo.InvariantCulture,
+            $"{info.Width}×{info.Height}{aspect} · {info.Fps.Value:0.###} fps · {FormatTime(info.DurationSeconds)} · 영상 {info.VideoCodec ?? "?"}{interlaced} · 오디오 {audio}{subtitles}");
+    }
+
+    /// <summary>처음 잡아 주는 출력 파일: 원본 옆의 "이름 [nekoVup].mp4". 목록의 다른 영상과 겹치면 번호를 붙인다.</summary>
+    private string DefaultOutput(MediaInfo info)
+    {
+        // 자막이 있으면 자막을 담을 수 있는 mkv를 기본으로 한다.
+        string extension = info.SubtitleCodecs.Count > 0 || Path.GetExtension(info.Path).Equals(".mkv", StringComparison.OrdinalIgnoreCase) ? ".mkv" : ".mp4";
+        string output = Path.Combine(Path.GetDirectoryName(info.Path)!, Path.GetFileNameWithoutExtension(info.Path) + " [nekoVup]" + extension);
+        return BatchCheck.MakeUnique(output, Queue.Select(item => ReferenceEquals(item, _current) ? OutputPath : item.OutputPath));
+    }
+
+    /// <summary>목록에서 고른 영상을 화면에 연다. 처리하는 동안에는 바꾸지 못한다 (처리 중인 영상을 보여 준다).</summary>
+    public void SelectVideo(QueueItemViewModel item)
+    {
+        if (IsRunning && !ReferenceEquals(item, _current))
+        {
+            ShowInfo("처리하는 동안에는 다른 영상을 열 수 없습니다. 지금 처리하는 영상이 화면에 보입니다.");
+            return;
+        }
+        if (!CanEditQueue || !Queue.Contains(item)) return;
+        ClearMessage();
+        Select(item);
+        // 실패한 영상을 누르면 그 까닭을 다시 보여 준다 (여럿을 처리할 때는 영상마다 알림을 띄우지 않는다).
+        if (item is { State: QueueState.Failed, Detail.Length: > 0 }) ShowError(item.Detail);
+    }
+
+    /// <summary>화면의 박스·구간·출력 파일을 지금 영상에 넣어 둔다 (다른 영상을 보다가 돌아오면 그대로 있게).</summary>
+    private void SaveCurrent()
+    {
+        if (_current is not { } item) return;
+        item.Boxes = [.. Boxes];
+        (item.RangeOn, item.RangeStart, item.RangeEnd) = (RangeOn, RangeStart, RangeEnd);
+        item.OutputPath = OutputPath;
+        item.PreviewSeconds = PreviewSeconds;
+        // 결과 파일은 처리가 끝날 때 넣어 둔다 (ExecuteAsync) — 여기서 화면의 것을 넣으면 빠른 미리보기(임시 파일)가 섞인다.
+    }
+
+    private void Select(QueueItemViewModel item)
+    {
+        if (ReferenceEquals(item, _current)) return;
+        SaveCurrent();
+        _selecting = true;
+        try
+        {
+            if (_current is { } previous) previous.IsCurrent = false;
+            // Clear()는 지운 박스를 알려 주지 않아 구독이 남는다 — 하나씩 뺀다.
+            while (Boxes.Count > 0) Boxes.RemoveAt(Boxes.Count - 1);
+            _current = item;
+            item.IsCurrent = true;
+
+            var info = item.Info;
             Info = info;
             InputPath = info.Path;
-            FileName = Path.GetFileName(info.Path);
+            FileName = item.Name;
+            InfoText = item.InfoText;
             DurationSeconds = Math.Max(info.DurationSeconds, 0.1);
             FrameSeconds = 1 / info.Fps.Value;
             PreviewView = PreviewMode.Original;
-            HasResult = false;
-            ResultPath = null;
-            ResultIsPreview = false;
-            _resultWindow = null;
             DeletePreviewFiles(); // 앞 영상의 빠른 미리보기는 더 쓸 데가 없다
-            Boxes.Clear();
-            // 구간은 영상마다 다르다 — 새 영상에서는 꺼 두고, 켜면 그 영상에서 다시 잡는다.
+            // 이 영상을 처리해 둔 결과가 남아 있으면 다시 볼 수 있다.
+            ResultPath = item.ResultPath is { } result && File.Exists(result) ? result : null;
+            _resultWindow = ResultPath is null ? null : item.ResultWindow;
+            ResultIsPreview = false;
+            HasResult = ResultPath is not null;
+            // 구간은 영상마다 다르다. 값을 먼저 넣고 켠다 — 켜는 순간 구간이 비어 있으면 기본 구간으로 덮어쓴다.
+            RangeOn = false;
+            (RangeStart, RangeEnd) = (item.RangeStart, item.RangeEnd);
+            RangeOn = item.RangeOn;
+            foreach (var box in item.Boxes) Boxes.Add(box);
+            OutputPath = item.OutputPath;
+            HasVideo = true;
+        }
+        finally
+        {
+            _selecting = false;
+        }
+        // 영상마다 다르다 (길이를 모르는 파일은 구간을 못 고른다). 두 번째 영상부터는 HasVideo가 그대로라 직접 알린다.
+        OnPropertyChanged(nameof(CanUseRange));
+        OnPropertyChanged(nameof(RangeText));
+        OnPropertyChanged(nameof(RangeStartText));
+        OnPropertyChanged(nameof(RangeEndText));
+        OnPropertyChanged(nameof(TimelineRangeStart));
+        OnPropertyChanged(nameof(TimelineRangeEnd));
+        if (!IsRunning) StatusText = "준비됨";
+        PreviewSeconds = item.PreviewSeconds;
+        // 시각이 앞 영상과 같으면 위 줄이 아무 일도 하지 않아 전체 길이 표시와 움직이는 박스의 자리가 옛 값으로 남는다.
+        OnPreviewSecondsChanged(PreviewSeconds);
+        UpdateDerived();
+        VideoChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>열린 영상이 없는 처음 화면으로 돌아간다 (목록을 다 비웠을 때).</summary>
+    private void CloseVideo()
+    {
+        _selecting = true;
+        try
+        {
+            if (_current is { } previous) previous.IsCurrent = false;
+            _current = null;
+            while (Boxes.Count > 0) Boxes.RemoveAt(Boxes.Count - 1);
+            PreviewView = PreviewMode.Original;
+            DeletePreviewFiles();
+            ResultPath = null;
+            _resultWindow = null;
+            ResultIsPreview = false;
+            HasResult = false;
             RangeOn = false;
             (RangeStart, RangeEnd) = (0, 0);
-
-            string aspect = info.SampleAspectRatio is { Num: var n, Den: var d } && n != d
-                ? string.Create(CultureInfo.InvariantCulture, $" (화면비 {info.DisplayAspect:0.00}:1)")
-                : "";
-            string subtitles = info.SubtitleCodecs.Count > 0 ? $" · 자막 {info.SubtitleCodecs.Count}개" : "";
-            string audio = info.HasAudio ? string.Join(", ", info.AudioCodecs) : "없음";
-            string interlaced = info.IsInterlaced ? " · 인터레이스" : "";
-            InfoText = string.Create(CultureInfo.InvariantCulture,
-                $"{info.Width}×{info.Height}{aspect} · {info.Fps.Value:0.###} fps · {FormatTime(info.DurationSeconds)} · 영상 {info.VideoCodec ?? "?"}{interlaced} · 오디오 {audio}{subtitles}");
-
-            // 자막이 있으면 자막을 담을 수 있는 mkv를 기본으로 한다.
-            string extension = info.SubtitleCodecs.Count > 0 || Path.GetExtension(path).Equals(".mkv", StringComparison.OrdinalIgnoreCase) ? ".mkv" : ".mp4";
-            OutputPath = Path.Combine(Path.GetDirectoryName(info.Path)!, Path.GetFileNameWithoutExtension(info.Path) + " [nekoVup]" + extension);
-
-            HasVideo = true;
-            // 영상마다 다르다 (길이를 모르는 파일은 구간을 못 고른다). 두 번째 영상부터는 HasVideo가 그대로라 직접 알린다.
-            OnPropertyChanged(nameof(CanUseRange));
-            OnPropertyChanged(nameof(RangeText));
-            StatusText = "준비됨";
-            PreviewSeconds = Math.Min(DurationSeconds / 2, 60);
-            // 시각이 앞 영상과 같으면 위 줄이 아무 일도 하지 않아 전체 길이 표시가 옛 값으로 남는다.
-            OnPreviewSecondsChanged(PreviewSeconds);
-            UpdateDerived();
-            VideoChanged?.Invoke(this, EventArgs.Empty);
+            Info = null;
+            (InputPath, FileName, InfoText, OutputPath) = ("", "", "", "");
+            HasVideo = false;
         }
-        catch (JobException ex)
+        finally
         {
-            if (serial == _loadSerial) ShowError(ex.Message);
+            _selecting = false;
         }
-        catch (ToolFailedException ex)
+        OnPropertyChanged(nameof(CanUseRange));
+        OnPropertyChanged(nameof(RangeText));
+        StatusText = "준비됨";
+        UpdateDerived();
+        VideoChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>영상을 목록에서 뺀다 (파일은 건드리지 않는다). 보고 있던 영상이면 옆의 영상을 연다.</summary>
+    public void RemoveVideo(QueueItemViewModel item)
+    {
+        int index = Queue.IndexOf(item);
+        if (IsRunning)
         {
-            if (serial == _loadSerial) ShowError("ffprobe를 실행하지 못했습니다. 환경 설정에서 FFmpeg 위치를 확인하세요.\n" + FirstLine(ex.Message));
+            ShowInfo("처리하는 동안에는 목록에서 뺄 수 없습니다. 먼저 [중지]를 누르세요.");
+            return;
         }
+        if (!CanEditQueue || index < 0) return;
+        ClearMessage();
+        if (ReferenceEquals(item, _current))
+        {
+            if (Queue.Count == 1) CloseVideo();
+            else Select(Queue[index + 1 < Queue.Count ? index + 1 : index - 1]);
+        }
+        Queue.RemoveAt(index);
+    }
+
+    /// <summary>목록을 모두 비우고 처음 화면으로 돌아간다.</summary>
+    public void ClearQueue()
+    {
+        if (!CanEditQueue) return;
+        ClearMessage();
+        CloseVideo();
+        while (Queue.Count > 0) Queue.RemoveAt(Queue.Count - 1);
+    }
+
+    /// <summary>끝난 영상도 모두 '대기'로 돌린다 — 옵션을 바꿔 전부 다시 처리하고 싶을 때.</summary>
+    public void ResetQueue()
+    {
+        if (!CanEditQueue) return;
+        foreach (var item in Queue) (item.State, item.Detail, item.Percent) = (QueueState.Waiting, "", 0);
+        RefreshQueueTexts();
+    }
+
+    /// <summary>
+    /// 지금 영상의 박스·구간·출력 파일을 고쳤다 — 이미 끝난 영상이면 다시 '대기'로 돌린다.
+    /// 안 그러면 고치고 시작을 눌러도 이 영상은 건너뛴다.
+    /// </summary>
+    private void Touch()
+    {
+        if (_selecting || _following || IsRunning || _current is not { State: not QueueState.Waiting } item) return;
+        (item.State, item.Detail, item.Percent) = (QueueState.Waiting, "", 0);
+        RefreshQueueTexts();
+    }
+
+    partial void OnOutputPathChanged(string value) => Touch();
+
+    /// <summary>
+    /// 지금 영상의 박스를 목록의 다른 영상에도 넣는다 (그 영상에 있던 박스는 바꾼다). 같은 워터마크가 찍힌 영상 묶음을
+    /// 한 번에 처리할 때 쓴다. 화면 크기가 다른 영상은 자리가 맞지 않으므로 건너뛴다.
+    /// </summary>
+    public void ApplyBoxesToOthers()
+    {
+        if (!CanEditQueue || _current is not { } source || Info is not { } info) return;
+        if (Boxes.Count == 0)
+        {
+            ShowInfo("다른 영상에 넣을 박스가 없습니다. 먼저 이 영상에서 워터마크 위치를 정하세요.");
+            return;
+        }
+        int applied = 0, skipped = 0;
+        foreach (var item in Queue)
+        {
+            if (ReferenceEquals(item, source)) continue;
+            if (item.Info.Width != info.Width || item.Info.Height != info.Height)
+            {
+                skipped++;
+                continue;
+            }
+            long frame = FrameAt(item.Info, item.PreviewSeconds);
+            item.Boxes = [.. Boxes.Select(box => CopyBox(box, info, item.Info, frame)).OfType<BoxViewModel>()];
+            if (item.State != QueueState.Waiting) (item.State, item.Detail, item.Percent) = (QueueState.Waiting, "", 0);
+            applied++;
+        }
+        RefreshQueueTexts();
+        string skippedNote = skipped > 0 ? $" 화면 크기가 다른 {skipped}개는 건너뛰었습니다." : "";
+        ShowInfo(applied > 0
+            ? $"이 영상의 박스 {Boxes.Count}개를 다른 영상 {applied}개에 넣었습니다.{skippedNote}"
+            : "화면 크기가 같은 다른 영상이 없어 넣지 못했습니다.");
+    }
+
+    /// <summary>박스를 다른 영상에 넣을 사본으로. 움직이는 박스는 시각으로 옮겨 그 영상의 프레임에 맞춘다.</summary>
+    private static BoxViewModel? CopyBox(BoxViewModel box, MediaInfo from, MediaInfo to, long frame)
+    {
+        if (box.ToTrack(from.Fps.Value) is { } track) return TrackBox(track, to, frame);
+        if (box.ToRect() is not { IsEmpty: false } rect) return null;
+        var copy = new BoxViewModel(rect);
+        copy.ShowAt(frame);
+        return copy;
     }
 
     /// <summary>
     /// 명령줄로 받은 시작 옵션을 적용한다. 예: NekoVup.exe 영상.mp4 --box 1040,40,190,56 --mode delogo --upscale anime --scale 2 --test-seconds 10 --output 결과.mkv
+    /// 영상을 여럿 적으면 모두 목록에 올리고, 박스·구간·출력 옵션은 첫 영상에 적용한다.
     /// </summary>
     public async Task ApplyStartupAsync(IReadOnlyList<string> arguments)
     {
-        string? file = null;
+        var files = new List<string>();
         var options = new List<(string Name, string Value)>();
         for (int i = 0; i < arguments.Count; i++)
         {
             if (arguments[i].StartsWith("--", StringComparison.Ordinal) && i + 1 < arguments.Count) options.Add((arguments[i], arguments[++i]));
-            else file ??= arguments[i];
+            else if (File.Exists(arguments[i])) files.Add(arguments[i]);
         }
-        if (file is null || !File.Exists(file)) return;
+        if (files.Count == 0) return;
 
-        await LoadVideoAsync(file);
+        await AddVideosAsync(files);
         if (!HasVideo) return;
         double? rangeStart = null, rangeLength = null;
         foreach (var (name, value) in options)
@@ -706,7 +994,7 @@ public sealed partial class MainViewModel : ObservableObject
     /// 결과 파일이 담은 원본 구간. <paramref name="File"/>은 파일에 든 프레임, <paramref name="View"/>는 그 가운데 볼 수 있는 부분
     /// (빠른 미리보기에서는 실제 렌더링과 같게 나오는 부분만 — <see cref="ScenePlan.Exact"/>).
     /// </summary>
-    private readonly record struct ResultWindow(FrameSpan File, FrameSpan View, double Fps)
+    internal readonly record struct ResultWindow(FrameSpan File, FrameSpan View, double Fps)
     {
         public bool Contains(double seconds) => View.Contains(FrameGrid.FrameAt(seconds, Fps));
         public double Clamp(double seconds) => Contains(seconds) ? seconds : FrameGrid.TimeOf(View.Clamp(FrameGrid.FrameAt(seconds, Fps)), Fps);
@@ -774,22 +1062,27 @@ public sealed partial class MainViewModel : ObservableObject
     /// <summary>움직이는 박스를 넣는다 (명령줄의 --move, --jump).</summary>
     private void AddTrack(BoxTrack track)
     {
-        if (Info is not { } info) return;
+        if (Info is { } info && TrackBox(track, info, PlayheadFrame(info)) is { } box) Boxes.Add(box);
+    }
+
+    /// <summary>시각으로 적힌 움직임을 그 영상의 박스로 만든다. 쓸 수 있는 자리가 하나도 없으면 null.</summary>
+    private static BoxViewModel? TrackBox(BoxTrack track, MediaInfo info, long playhead)
+    {
         try
         {
             // 숫자 칸은 화면 밖의 값을 담지 못한다 (0보다 작으면 0으로 고쳐 적는다) — 화면에 걸치는 동안의 자리를 화면 안으로 잘라서 넣는다.
             var screen = new PixelRect(0, 0, info.Width, info.Height);
-            if (BoxPath.From(track, info.Fps.Value).ClampTo(screen)?.Flatten() is not { } path) return;
+            if (BoxPath.From(track, info.Fps.Value).ClampTo(screen)?.Flatten() is not { } path) return null;
             // 영상 끝보다 뒤에 적은 자리에는 재생 헤드가 닿지 못한다 (가 볼 수도, 지울 수도 없다) — 마지막 프레임에서의 자리로 바꿔 둔다.
             long end = info.DurationSeconds > 0 ? Math.Max(0, info.EstimateFrames() - 1) : long.MaxValue;
             var keys = path.Frames.Select(frame => Math.Min(frame, end)).Distinct().Select(frame => KeyValuePair.Create(frame, path.At(frame)));
             var box = new BoxViewModel();
-            box.Load(BoxPath.FromFrames(keys, path.Jump), PlayheadFrame(info));
-            Boxes.Add(box);
+            box.Load(BoxPath.FromFrames(keys, path.Jump), playhead);
+            return box;
         }
         catch (ArgumentException)
         {
-            // 쓸 수 있는 자리가 하나도 없다
+            return null; // 쓸 수 있는 자리가 하나도 없다
         }
     }
 
@@ -824,12 +1117,17 @@ public sealed partial class MainViewModel : ObservableObject
             foreach (BoxViewModel box in e.OldItems) box.PropertyChanged -= OnBoxPropertyChanged;
         if (e.NewItems is not null)
             foreach (BoxViewModel box in e.NewItems) box.PropertyChanged += OnBoxPropertyChanged;
+        Touch();
         UpdateDerived();
     }
 
     private void OnBoxPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (!_following && e.PropertyName != nameof(BoxViewModel.KeyText)) UpdateDerived();
+        if (_following || e.PropertyName == nameof(BoxViewModel.KeyText)) return;
+        // 박스를 끌면 X·Y·너비·높이가 차례로 바뀐다 — 다 넣은 뒤의 알림(PlacedProperty) 하나로 한 번만 계산한다.
+        if (sender is BoxViewModel { Setting: true }) return;
+        Touch();
+        UpdateDerived();
     }
 
     partial void OnRemoveOnChanged(bool value) => UpdateDerived();
@@ -842,6 +1140,7 @@ public sealed partial class MainViewModel : ObservableObject
     {
         // 처음 켜면(정해 둔 구간이 없으면) 지금 보고 있는 자리부터 10초를 잡는다. 정해 둔 구간이 있으면(짧아도) 그대로 쓴다.
         if (value && RangeStart == 0 && RangeEnd == 0) PlaceDefaultRange();
+        Touch();
         UpdateDerived();
     }
 
@@ -855,12 +1154,14 @@ public sealed partial class MainViewModel : ObservableObject
     private void OnRangeEdited()
     {
         if (PreviewView != PreviewMode.Original) PreviewView = PreviewMode.Original;
+        Touch();
         UpdateDerived();
     }
 
     /// <summary>박스·옵션에서 따라 나오는 표시(처리 영역, 경고, 결과 크기)를 다시 계산한다.</summary>
     private void UpdateDerived()
     {
+        if (_selecting) return; // 다른 영상으로 바꾸는 중 — 다 옮긴 뒤에 한 번 계산한다
         var info = Info;
         RegionRects = [];
         RegionText = "";
@@ -917,7 +1218,7 @@ public sealed partial class MainViewModel : ObservableObject
 
     // ═════════════════════ 실행 ═════════════════════
 
-    public bool CanStart => HasVideo && !IsRunning && !IsUpdating;
+    public bool CanStart => HasVideo && !IsRunning && !IsUpdating && !IsAdding;
 
     /// <summary>
     /// 화면의 설정으로 작업 요청을 만든다. <paramref name="scene"/>이면 재생 헤드 둘레만 임시 폴더로 처리하는 빠른 미리보기.
@@ -1116,37 +1417,177 @@ public sealed partial class MainViewModel : ObservableObject
     public Task WaitForJobAsync(TimeSpan timeout) =>
         _jobDone is { } done ? Task.WhenAny(done.Task, Task.Delay(timeout)) : Task.CompletedTask;
 
-    public Task StartAsync() => RunJobAsync(scene: false);
+    /// <summary>
+    /// 시작: 목록에 아직 끝나지 않은 영상이 있으면 위에서부터 차례로 처리하고(사용자 요청), 하나뿐이거나 모두 끝났으면 지금 영상을 처리한다.
+    /// 영상마다 자기 박스·구간·출력 파일을 쓰고, 제거 방식·업스케일 같은 옵션은 함께 쓴다.
+    /// 하나가 실패해도 다음 영상으로 넘어가고, 취소하면 남은 영상은 그대로 남는다 (다시 시작하면 이어서 한다).
+    /// </summary>
+    public async Task StartAsync()
+    {
+        if (!CanRun()) return;
+        ClearMessage();
+        var targets = StartTargets();
+        if (targets.Count == 0) return;
+
+        // 시작하기 전에 모든 영상의 설정을 먼저 본다 — 몇 시간 뒤 세 번째 영상에서 "워터마크 위치가 없습니다"로 멈추지 않게.
+        // 화면의 값으로 요청을 만들므로 영상을 하나씩 열어 가며 만든다. 걸리는 것이 있으면 그 영상을 연 채로 멈춘다.
+        var jobs = new List<(QueueItemViewModel Item, JobRequest Request, ResultWindow? Window)>();
+        foreach (var item in targets)
+        {
+            Select(item);
+            if (BuildRequest(scene: false, out var window) is not { } request)
+            {
+                if (targets.Count > 1) Message = $"[{item.Name}] {Message}";
+                return;
+            }
+            jobs.Add((item, request, window));
+        }
+        if (Queue.Count > 1)
+        {
+            var entries = jobs.Select(job => new BatchEntry(job.Item.Name, job.Request.InputPath, job.Request.OutputPath)).ToList();
+            if (BatchCheck.FindConflict(entries, Queue.Select(item => item.Path)) is { } conflict)
+            {
+                ShowError(conflict);
+                return;
+            }
+        }
+
+        bool batch = jobs.Count > 1;
+        int done = 0, failed = 0;
+        string? cancelNote = null;
+        BeginRun();
+        try
+        {
+            for (int i = 0; i < jobs.Count; i++)
+            {
+                var (item, request, window) = jobs[i];
+                Select(item); // 처리하는 영상을 화면에 보여 준다 (끝나면 그 결과를 바로 볼 수 있다)
+                if (batch)
+                {
+                    BatchText = string.Create(CultureInfo.InvariantCulture, $"영상 {i + 1}/{jobs.Count}");
+                    AppendLog(string.Create(CultureInfo.InvariantCulture, $"── {i + 1}/{jobs.Count} · {item.Name} ──"));
+                }
+                var end = await ExecuteAsync(request, window, scene: false, item, batch);
+                if (end.Outcome == Outcome.Cancelled)
+                {
+                    cancelNote = end.Note;
+                    break;
+                }
+                if (end.Outcome == Outcome.Done) done++;
+                else failed++;
+            }
+            if (!batch) return;
+
+            // 여럿을 처리한 때는 영상마다 알림을 띄우지 않았다 — 끝에 한 번 모아서 알린다.
+            string failedNote = failed > 0 ? $", {failed}개 실패" : "";
+            if (cancelNote is not null)
+            {
+                int left = jobs.Count - done - failed;
+                StatusText = "중지됨";
+                ShowInfo($"취소했습니다 ({done}개 완료{failedNote}, {left}개 남음). [시작]을 다시 누르면 남은 영상을 이어서 처리합니다."
+                    + (cancelNote.Length > 0 ? "\n처리하던 영상: " + cancelNote : ""));
+            }
+            else if (failed > 0)
+            {
+                StatusText = $"{done}개 완료 · {failed}개 실패";
+                ShowError($"영상 {jobs.Count}개 가운데 {done}개를 완료했고 {failed}개는 실패했습니다. 목록에서 실패한 영상을 누르면 까닭이 보입니다. 해결한 뒤 [시작]을 다시 누르면 실패한 영상만 다시 처리합니다.");
+            }
+            else
+            {
+                StatusText = $"{done}개 완료";
+                ShowInfo($"영상 {done}개를 모두 완료했습니다. 목록에서 영상을 누르면 결과를 볼 수 있습니다.");
+            }
+        }
+        finally
+        {
+            EndRun();
+        }
+    }
 
     /// <summary>
     /// 현재 장면 빠른 미리보기: 재생 헤드 둘레만 지금 설정으로 처리해 비교 보기로 보여 준다 (사용자 요청).
     /// 실제 작업과 같은 처리 과정·같은 조각(<see cref="ScenePlanner"/>)을 쓰므로 보이는 것이 렌더링 결과와 같다.
     /// ProPainter와 옛 비디오를 함께 켠 때만 옛 비디오의 조각 자리가 실제와 달라 조금 다를 수 있다. 출력 파일은 만들지 않는다.
     /// </summary>
-    public Task PreviewSceneAsync() => RunJobAsync(scene: true);
-
-    private async Task RunJobAsync(bool scene)
+    public async Task PreviewSceneAsync()
     {
-        if (IsRunning) return;
+        if (!CanRun()) return;
+        ClearMessage();
+        if (BuildRequest(scene: true, out var window) is not { } request) return;
+        BeginRun();
+        try
+        {
+            await ExecuteAsync(request, window, scene: true, item: null, batch: false);
+        }
+        finally
+        {
+            EndRun();
+        }
+    }
+
+    private bool CanRun()
+    {
+        if (IsRunning || IsAdding) return false;
         if (IsUpdating)
         {
             ShowInfo("업데이트하는 중입니다. 프로그램이 다시 시작된 뒤에 시작하세요.");
-            return;
+            return false;
         }
-        ClearMessage();
-        var request = BuildRequest(scene, out var window);
-        if (request is null) return;
+        return true;
+    }
 
+    /// <summary>실행을 시작한다 (영상 하나든 여럿이든 한 번). 취소 단추는 이 실행 전체를 멈춘다.</summary>
+    private void BeginRun()
+    {
         Log.Clear();
         HasRun = true;
+        BatchText = "";
+        _jobDone = new TaskCompletionSource();
+        _jobCancel = new CancellationTokenSource();
+        IsRunning = true;
+        OnPropertyChanged(nameof(CanStart));
+    }
+
+    private void EndRun()
+    {
+        _jobCancel?.Dispose();
+        _jobCancel = null;
+        BatchText = "";
+        IsRunning = false;
+        OnPropertyChanged(nameof(CanStart));
+        RefreshQueueTexts();
+        _jobDone?.TrySetResult();
+        _jobDone = null;
+    }
+
+    private enum Outcome
+    {
+        Done,
+        Cancelled,
+        Failed,
+    }
+
+    /// <summary>작업 하나가 끝난 모습. <paramref name="Note"/>는 취소했을 때 다시 시작하면 무엇이 남아 있는지.</summary>
+    private readonly record struct JobEnd(Outcome Outcome, string Note = "");
+
+    /// <summary>처리하고 있는 목록의 영상 (빠른 미리보기면 null).</summary>
+    private QueueItemViewModel? _runningItem;
+
+    /// <summary>작업마다 하나씩 올린다 — 앞 작업이 보낸 진행 알림이 늦게 와도 다음 작업의 표시를 건드리지 않게.</summary>
+    private int _runSerial;
+
+    /// <summary>
+    /// 작업 하나를 돌리고 화면에 결과를 적는다. <paramref name="batch"/>면 여럿 가운데 하나라 알림은 띄우지 않고
+    /// 로그와 목록에만 적는다 (알림은 다 끝난 뒤 한 번).
+    /// </summary>
+    private async Task<JobEnd> ExecuteAsync(JobRequest request, ResultWindow? window, bool scene, QueueItemViewModel? item, bool batch)
+    {
         HasResult = false;
         PreviewView = PreviewMode.Original;
         ResultPath = null;
         ResultIsPreview = false;
         _resultWindow = null;
         if (scene) DeletePreviewFiles();
-        _jobDone = new TaskCompletionSource();
-        IsRunning = true;
         StageText = "준비 중";
         StatusText = "처리 중";
         DetailText = "";
@@ -1156,17 +1597,23 @@ public sealed partial class MainViewModel : ObservableObject
         EtaText = "";
         _lastStage = null;
         _eta.Restart();
-        OnPropertyChanged(nameof(CanStart));
+        int serial = ++_runSerial;
+        _runningItem = item;
+        if (item is not null)
+        {
+            (item.State, item.Detail, item.Percent) = (QueueState.Running, "", 0);
+            // 앞서 만든 결과는 이제 덮어쓴다 — 실패하거나 취소하면 볼 결과가 없다.
+            (item.ResultPath, item.ResultWindow) = (null, null);
+        }
 
-        _jobCancel = new CancellationTokenSource();
-        var token = _jobCancel.Token;
+        var token = _jobCancel!.Token;
         var log = new DelegateJobLog((level, message) =>
         {
             if (level == LogLevel.Detail) return; // 도구 출력은 작업 폴더의 job.log에 남는다
             string prefix = level switch { LogLevel.Warning => "⚠ ", LogLevel.Error => "✖ ", _ => "" };
             _dispatcher.TryEnqueue(() => AppendLog(prefix + message));
         });
-        var progress = new CallbackProgress(OnProgress);
+        var progress = new CallbackProgress(value => OnProgress(value, serial));
         var jobRunner = new JobRunner(Settings, _runner, log);
 
         try
@@ -1184,6 +1631,12 @@ public sealed partial class MainViewModel : ObservableObject
             TotalText = "100%";
             EtaText = "";
             StatusText = scene ? "미리보기 완료" : "완료";
+            if (item is not null)
+            {
+                (item.State, item.Detail, item.Percent) = (QueueState.Done, $"{DetailText} → {result.OutputPath}", 100);
+                // 다른 영상을 보다가 돌아와도 이 결과를 다시 볼 수 있게 넣어 둔다.
+                (item.ResultPath, item.ResultWindow) = (result.OutputPath, _resultWindow);
+            }
             if (scene)
             {
                 // 차이가 한눈에 보이게 원본·결과 나란히 보기로 연다
@@ -1193,10 +1646,15 @@ public sealed partial class MainViewModel : ObservableObject
                     : "";
                 ShowInfo($"이 장면{span}을 지금 설정으로 처리해 봤습니다 (출력 파일은 만들지 않았습니다). 미리보기의 세로선을 끌어 원본과 비교하세요.");
             }
+            else if (batch)
+            {
+                AppendLog("✔ 완료: " + result.OutputPath);
+            }
             else
             {
                 ShowInfo("완료했습니다: " + result.OutputPath);
             }
+            return new JobEnd(Outcome.Done);
         }
         catch (OperationCanceledException)
         {
@@ -1204,36 +1662,37 @@ public sealed partial class MainViewModel : ObservableObject
             StatusText = "중지됨";
             EtaText = "";
             string note = scene ? "" : ResumeNote(request); // 빠른 미리보기는 이어서 하지 않는다 (매번 새로 처리한다)
-            ShowInfo(note.Length > 0 ? "취소했습니다. " + note : "취소했습니다.");
+            if (item is not null) (item.State, item.Detail) = (QueueState.Cancelled, note);
+            if (!batch) ShowInfo(note.Length > 0 ? "취소했습니다. " + note : "취소했습니다.");
+            return new JobEnd(Outcome.Cancelled, note);
         }
         catch (Exception ex) when (ex is JobException or ToolFailedException or IOException or UnauthorizedAccessException)
         {
             // 디스크가 꽉 찼거나 폴더에 쓸 수 없는 것(IOException 등)도 작업 실패로 보여 준다 — 안 그러면 화면이 "처리 중"에 멈춘 것처럼 남는다.
-            StageText = "실패";
-            StatusText = "실패 — 로그를 확인하세요";
-            EtaText = "";
             AppendLog("✖ " + ex.Message);
-            ShowError(FirstLine(ex.Message) + RetryHint(ex, scene ? "" : ResumeNote(request)));
+            return Fail(FirstLine(ex.Message) + RetryHint(ex, scene ? "" : ResumeNote(request)));
         }
         catch (Exception ex)
         {
             // 예상하지 못한 오류도 화면을 "실패"로 돌려놓고 파일에 남긴다 — 그냥 두면 단계 표시가 "처리 중"에 멈춘 채 남는다.
             App.LogError(ex);
-            StageText = "실패";
-            StatusText = "실패 — 로그를 확인하세요";
-            EtaText = "";
             AppendLog("✖ " + ex);
-            ShowError("예기치 못한 오류: " + FirstLine(ex.Message) + RetryHint(ex, scene ? "" : ResumeNote(request)));
+            return Fail("예기치 못한 오류: " + FirstLine(ex.Message) + RetryHint(ex, scene ? "" : ResumeNote(request)));
         }
         finally
         {
             _eta.Stop();
-            _jobCancel.Dispose();
-            _jobCancel = null;
-            IsRunning = false;
-            OnPropertyChanged(nameof(CanStart));
-            _jobDone.TrySetResult();
-            _jobDone = null;
+            _runningItem = null;
+        }
+
+        JobEnd Fail(string message)
+        {
+            StageText = "실패";
+            StatusText = "실패 — 로그를 확인하세요";
+            EtaText = "";
+            if (item is not null) (item.State, item.Detail) = (QueueState.Failed, message);
+            if (!batch) ShowError(message);
+            return new JobEnd(Outcome.Failed);
         }
     }
 
@@ -1248,7 +1707,7 @@ public sealed partial class MainViewModel : ObservableObject
     }
 
     /// <summary>작업 스레드에서 불린다. 화면 갱신은 너무 잦지 않게(초당 10번 정도) 줄여서 넘긴다.</summary>
-    private void OnProgress(JobProgress value)
+    private void OnProgress(JobProgress value, int serial)
     {
         long now = Stopwatch.GetTimestamp();
         bool stageChanged = value.Stage != _lastStage;
@@ -1258,7 +1717,8 @@ public sealed partial class MainViewModel : ObservableObject
 
         _dispatcher.TryEnqueue(() =>
         {
-            if (!IsRunning) return;
+            if (!IsRunning || serial != _runSerial) return;
+            if (_runningItem is { } item) item.Percent = (int)Math.Clamp(value.OverallFraction * 100, 0, 100);
             StageText = StageName(value.Stage);
             DetailText = value.Detail ?? "";
             StageProgress = value.StageFraction * 100;

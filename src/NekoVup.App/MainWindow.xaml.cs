@@ -659,19 +659,20 @@ public sealed partial class MainWindow : Window
         }
 
         // 여기부터는 작업·ProPainter 준비를 새로 시작할 수 없다 (IsUpdating을 보고 막는다) — 내려받는 사이 시작한 작업이 적용 때 죽지 않게.
-        ViewModel.IsUpdating = true;
+        // 진행은 화면 위 진행 줄에 보여 주고, 프로그램이 닫힌 뒤의 적용 진행은 따로 뜨는 안내 창이 보여 준다 (UpdateSplash).
+        string version = _pendingUpdate.TargetFullRelease.Version.ToString();
+        ViewModel.BeginUpdate(version);
         try
         {
             var dispatcher = DispatcherQueue;
             await _update.DownloadAndApplyAsync(_pendingUpdate,
-                percent => dispatcher.TryEnqueue(() => ViewModel.StatusText = $"업데이트 내려받는 중 {percent}%"));
+                percent => dispatcher.TryEnqueue(() => ViewModel.ReportUpdateDownload(version, percent)),
+                () => dispatcher.TryEnqueue(ViewModel.ReportUpdateApplying));
         }
         catch (Exception ex)
         {
             App.LogError(ex);
-            ViewModel.StatusText = "업데이트 실패";
-            ViewModel.ShowError("업데이트하지 못했습니다: " + ex.Message);
-            ViewModel.IsUpdating = false;
+            ViewModel.FailUpdate(ex.Message);
         }
     }
 }

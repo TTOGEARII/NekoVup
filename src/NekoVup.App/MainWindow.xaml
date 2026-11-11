@@ -35,6 +35,21 @@
                      IsOpen="{x:Bind ViewModel.HasMessage, Mode=TwoWay}"
                      Message="{x:Bind ViewModel.Message, Mode=OneWay}" />
 
+            <!-- 업데이트 내려받기·적용 준비 진행 (사용자 요청: 진행이 보이지 않아 멈춘 것처럼 보였다). 적용 중의 진행은 따로 뜨는 안내 창이 보여 준다. -->
+            <Border Style="{StaticResource Panel}" Margin="12,0,12,8" Padding="12,8" Visibility="{x:Bind ViewModel.IsUpdating, Mode=OneWay}">
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <FontIcon Glyph="&#xE896;" FontSize="16" Foreground="{ThemeResource NekoAccent}" VerticalAlignment="Center" />
+                    <StackPanel Grid.Column="1" Spacing="6" VerticalAlignment="Center">
+                        <TextBlock Text="{x:Bind ViewModel.UpdateText, Mode=OneWay}" FontSize="12.5" TextWrapping="Wrap" Foreground="{ThemeResource NekoText}" />
+                        <ProgressBar Maximum="100" Value="{x:Bind ViewModel.UpdateFraction, Mode=OneWay}" IsIndeterminate="{x:Bind ViewModel.UpdateIndeterminate, Mode=OneWay}" />
+                    </StackPanel>
+                </Grid>
+            </Border>
+
             <!-- ProPainter 자동 준비 진행 (처음 실행 때 약 3 GB 내려받기) -->
             <Border Style="{StaticResource Panel}" Margin="12,0,12,8" Padding="12,8" Visibility="{x:Bind ViewModel.SetupRunning, Mode=OneWay}">
                 <Grid ColumnSpacing="12">

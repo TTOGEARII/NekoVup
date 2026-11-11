@@ -31,11 +31,17 @@ public sealed class UpdateService
     /// <summary>Velopack이 휴대용 판 폴더에 두는 표시 파일.</summary>
     private static string PortableMarker => Path.Combine(InstallRoot, ".portable");
 
+    /// <summary>지금 돌고 있는 버전 ("1.0.2"). 안내 창에 "v1.0.2 → v1.1.0"으로 보여 준다.</summary>
+    private string CurrentVersion => _manager.CurrentVersion?.ToString() ?? typeof(UpdateService).Assembly.GetName().Version?.ToString(3) ?? "?";
+
     /// <summary>새 버전이 있으면 그 정보를, 없거나 설치형이 아니면 null을 돌려준다.</summary>
     public async Task<UpdateInfo?> CheckAsync() => IsInstalled ? await _manager.CheckForUpdatesAsync() : null;
 
-    /// <summary>내려받아 적용하고 다시 시작한다. 성공하면 돌아오지 않는다(프로세스가 끝난다).</summary>
-    public async Task DownloadAndApplyAsync(UpdateInfo info, Action<int>? progress)
+    /// <summary>
+    /// 내려받아 적용하고 다시 시작한다. 성공하면 돌아오지 않는다(프로세스가 끝난다).
+    /// <paramref name="progress"/>는 내려받기 진행률(%), <paramref name="applying"/>은 내려받기가 끝나 곧 프로그램이 닫힐 때 한 번 부른다.
+    /// </summary>
+    public async Task DownloadAndApplyAsync(UpdateInfo info, Action<int>? progress, Action? applying = null)
     {
         Log("내려받기 시작");
         await _manager.DownloadUpdatesAsync(info, progress);
@@ -45,9 +51,10 @@ public sealed class UpdateService
         if (OtherInstancesRunning())
             throw new InvalidOperationException("다른 NekoVup 창이 열려 있어 적용하지 않았습니다. 다른 창을 모두 닫은 뒤에 다시 업데이트하세요.");
 
+        applying?.Invoke();
         string version = info.TargetFullRelease.Version.ToString();
         StartRestartWatchdog(version);
-        using var splash = StartApplySplash(version);
+        using var splash = StartApplySplash(version, CurrentVersion);
 
         // 조용히 적용하고 다시 시작한다. 이 호출 안에서 현재 프로세스가 끝난다.
         Log("적용 시작");
@@ -57,7 +64,7 @@ public sealed class UpdateService
         }
         catch (Exception ex)
         {
-            // 적용을 시작하지도 못했다. 안내 창은 항상 맨 위에 떠 있어서, 그냥 두면 3분 동안 오류 알림을 가린다.
+            // 적용을 시작하지도 못했다. 안내 창은 항상 맨 위에 떠 있어서, 그냥 두면 몇 분 동안 오류 알림을 가린다.
             Log("적용 실패: " + ex.Message);
             try
             {
@@ -131,69 +138,55 @@ public sealed class UpdateService
     /// <summary>설치 폴더. 실행 파일은 그 아래 current 폴더에 있다.</summary>
     private static string InstallRoot => Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, ".."));
 
+    /// <summary>업데이트 기록. 안내 창도 단계가 바뀔 때마다 여기에 적는다.</summary>
+    private static string LogPath => Path.Combine(SettingsStore.DataDirectory, "update.log");
+
     private static void Log(string message)
     {
         try
         {
             Directory.CreateDirectory(SettingsStore.DataDirectory);
-            File.AppendAllText(Path.Combine(SettingsStore.DataDirectory, "update.log"),
-                DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss ", CultureInfo.InvariantCulture) + message + Environment.NewLine);
+            File.AppendAllText(LogPath, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss ", CultureInfo.InvariantCulture) + message + Environment.NewLine);
         }
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
     }
 
     /// <summary>
-    /// 적용하는 동안 보여 줄 안내 창. 프로그램 폴더가 통째로 바뀌므로 그림과 스크립트를 임시 폴더로 복사해 따로 띄운다.
-    /// 새 버전이 적용되고 프로그램이 다시 뜨면 스스로 닫힌다. 그 전에라도 창을 누르거나 Esc를 치면 닫힌다 —
-    /// 항상 맨 위에 뜨는 창이라, 적용이 오래 걸리거나 멈췄을 때 화면 한가운데를 계속 가리지 않게 한다.
+    /// 적용하는 동안 보여 줄 안내 창 (<see cref="UpdateSplash"/>). 프로그램 폴더가 통째로 바뀌므로 그림·아이콘·스크립트를 임시 폴더로 복사해 따로 띄운다.
+    /// "닫는 중 → 적용 중 → 다시 여는 중 → 끝"을 보여 주고, 새 버전의 창이 뜬 것을 확인한 뒤 스스로 닫힌다.
     /// </summary>
-    private static Process? StartApplySplash(string targetVersion, int timeoutSeconds = 180)
+    private static Process? StartApplySplash(string targetVersion, string fromVersion)
     {
         try
         {
-            string marker = RestartWatchdog.VersionMarker(targetVersion);
             string source = Path.Combine(AppContext.BaseDirectory, "assets", "splash.png");
             if (!File.Exists(source)) return null;
             string folder = SplashFolder;
             Directory.CreateDirectory(folder);
             string image = Path.Combine(folder, "splash.png");
             File.Copy(source, image, overwrite: true);
+            string? icon = null;
+            string iconSource = Path.Combine(AppContext.BaseDirectory, "app.ico");
+            if (File.Exists(iconSource))
+            {
+                icon = Path.Combine(folder, "app.ico");
+                File.Copy(iconSource, icon, overwrite: true);
+            }
 
-            string versionFile = PsQuoted(Path.Combine(InstallRoot, "current", "sq.version"));
             string script = Path.Combine(folder, SplashScriptName);
-            // Windows PowerShell 5.1은 BOM 없는 스크립트를 ANSI로 읽어 한글 경로가 깨지므로 BOM을 붙여 쓴다.
-            File.WriteAllText(script, $$"""
-                Add-Type -AssemblyName System.Windows.Forms, System.Drawing
-                [System.Windows.Forms.Application]::EnableVisualStyles()
-                $picture = [System.Drawing.Image]::FromFile('{{PsQuoted(image)}}')
-                $box = New-Object System.Windows.Forms.PictureBox
-                $box.Image = $picture
-                $box.SizeMode = 'AutoSize'
-                $form = New-Object System.Windows.Forms.Form
-                $form.FormBorderStyle = 'None'
-                $form.StartPosition = 'CenterScreen'
-                $form.ClientSize = New-Object System.Drawing.Size($picture.Width, $picture.Height)
-                $form.TopMost = $true
-                $form.ShowInTaskbar = $false
-                $form.BackColor = [System.Drawing.Color]::FromArgb(23, 24, 27)
-                $form.Controls.Add($box)
-                $box.Add_Click({ $form.Close() })
-                $form.KeyPreview = $true
-                $form.Add_KeyDown({ if ($_.KeyCode -eq 'Escape') { $form.Close() } })
-                $versionFile = '{{versionFile}}'
-                $deadline = (Get-Date).AddSeconds({{timeoutSeconds}})
-                $timer = New-Object System.Windows.Forms.Timer
-                $timer.Interval = 500
-                $timer.Add_Tick({
-                    $applied = $false
-                    try { $applied = (Test-Path $versionFile) -and (Select-String -Path $versionFile -Pattern '{{marker}}' -SimpleMatch -Quiet) } catch {}
-                    $running = [bool](Get-Process {{ExeName}} -ErrorAction SilentlyContinue)
-                    if (($applied -and $running) -or ((Get-Date) -gt $deadline)) { $timer.Stop(); $form.Close() }
-                })
-                $timer.Start()
-                [void]$form.ShowDialog()
-                """, new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
+            // Windows PowerShell 5.1은 BOM 없는 스크립트를 ANSI로 읽어 한글이 깨지므로 BOM을 붙여 쓴다.
+            File.WriteAllText(script, UpdateSplash.BuildScript(new UpdateSplashOptions
+            {
+                ImagePath = image,
+                IconPath = icon,
+                VersionFile = Path.Combine(InstallRoot, "current", "sq.version"),
+                TargetVersion = targetVersion,
+                FromVersion = fromVersion,
+                ImageName = ExeName,
+                OldProcessId = Environment.ProcessId,
+                LogFile = LogPath,
+            }), new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
 
             // PATH에 같은 이름의 다른 파일이 앞서 있을 수 있어 시스템 폴더의 것을 바로 가리킨다.
             string powershell = Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe");
@@ -215,21 +208,6 @@ public sealed class UpdateService
     }
 
     /// <summary>
-    /// PowerShell 작은따옴표 문자열 안에 넣을 수 있게 따옴표를 두 번 적는다 (사용자 이름 O'Neil 등).
-    /// PowerShell은 굽은 따옴표(‘ ’ ‚ ‛)도 작은따옴표로 읽으므로 그것도 두 번 적어야 한다 — 그대로 두면 스크립트가 깨져 안내 창이 뜨지 않는다.
-    /// </summary>
-    private static string PsQuoted(string text)
-    {
-        var quoted = new StringBuilder(text.Length + 4);
-        foreach (char c in text)
-        {
-            if (c is '\'' or '‘' or '’' or '‚' or '‛') quoted.Append(c);
-            quoted.Append(c);
-        }
-        return quoted.ToString();
-    }
-
-    /// <summary>
     /// 적용 뒤 자동으로 다시 시작되지 않는 환경(백신이 새 실행 파일을 잠시 막는 경우)에 대비해,
     /// 바깥에서 지켜보다가 새 버전이 적용됐는데 프로그램이 떠 있지 않으면 대신 실행해 주는 감시자를 띄운다.
     /// </summary>
@@ -241,7 +219,7 @@ public sealed class UpdateService
             string versionFile = Path.Combine(InstallRoot, "current", "sq.version");
             if (!File.Exists(stub)) return;
 
-            // 기다리는 시간(3분)은 안내 창과 같다. 스크립트는 ASCII뿐이고, 경로는 아래에서 환경 변수로 넘긴다.
+            // 기다리는 시간(3분)은 안내 창보다 짧다 (안내 창은 띄우기 재시도까지 지켜본다). 스크립트는 ASCII뿐이고, 경로는 아래에서 환경 변수로 넘긴다.
             File.WriteAllText(WatchdogScript, RestartWatchdog.BuildScript(targetVersion, ExeName + ".exe", RestartWatchdog.LaunchCommand));
 
             var start = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "cmd.exe"))

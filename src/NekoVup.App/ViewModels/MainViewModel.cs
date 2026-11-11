@@ -1993,6 +1993,52 @@ public sealed partial class MainViewModel : ObservableObject
 
     public bool NotUpdating => !IsUpdating;
 
+    /// <summary>화면 위 업데이트 진행 줄의 글 (사용자 요청: 내려받는 동안 진행이 보이지 않아 멈춘 것처럼 보였다).</summary>
+    [ObservableProperty]
+    public partial string UpdateText { get; set; } = "";
+
+    /// <summary>내려받기 진행률(0~100).</summary>
+    [ObservableProperty]
+    public partial double UpdateFraction { get; set; }
+
+    /// <summary>진행률을 모르는 단계(준비, 적용)인지 — 막대가 흐른다.</summary>
+    [ObservableProperty]
+    public partial bool UpdateIndeterminate { get; set; }
+
+    /// <summary>업데이트를 시작했다: 진행 줄을 보이고, 작업·ProPainter 준비를 새로 시작하지 못하게 한다.</summary>
+    public void BeginUpdate(string version)
+    {
+        (UpdateFraction, UpdateIndeterminate) = (0, true);
+        UpdateText = $"새 버전 v{version}을(를) 내려받을 준비를 합니다…";
+        StatusText = "업데이트 준비 중";
+        IsUpdating = true;
+    }
+
+    public void ReportUpdateDownload(string version, int percent)
+    {
+        percent = Math.Clamp(percent, 0, 100);
+        (UpdateFraction, UpdateIndeterminate) = (percent, false);
+        UpdateText = string.Create(CultureInfo.InvariantCulture, $"새 버전 v{version} 내려받는 중 {percent}%");
+        StatusText = string.Create(CultureInfo.InvariantCulture, $"업데이트 내려받는 중 {percent}%");
+    }
+
+    /// <summary>내려받기가 끝나 곧 프로그램이 닫힌다. 그 뒤의 진행은 따로 뜨는 안내 창이 보여 준다.</summary>
+    public void ReportUpdateApplying()
+    {
+        (UpdateFraction, UpdateIndeterminate) = (100, true);
+        UpdateText = "내려받기 끝. 프로그램이 닫혔다가 새 버전으로 다시 열립니다 — 그동안의 진행은 따로 뜨는 안내 창에 보입니다.";
+        StatusText = "업데이트 적용 중";
+    }
+
+    /// <summary>업데이트하지 못했다: 진행 줄을 감추고 까닭을 알린다.</summary>
+    public void FailUpdate(string reason)
+    {
+        IsUpdating = false;
+        UpdateText = "";
+        StatusText = "업데이트 실패";
+        ShowError("업데이트하지 못했습니다: " + reason);
+    }
+
     /// <summary>정보 탭의 업데이트 상태 한 줄.</summary>
     [ObservableProperty]
     public partial string UpdateStatus { get; set; } = "";

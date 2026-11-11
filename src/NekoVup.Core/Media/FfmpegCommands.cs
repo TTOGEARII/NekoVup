@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text;
+using NekoVup.Core.Pipeline;
 using NekoVup.Core.Regions;
 
 namespace NekoVup.Core.Media;
@@ -101,18 +102,91 @@ public static class FfmpegCommands
     }
 
     /// <summary>빠른 모드: delogo 필터로 박스 안을 주변 픽셀로 메운다.</summary>
-    public static List<string> Delogo(MediaInfo info, IReadOnlyList<PixelRect> boxes, double? startSeconds, double? durationSeconds, EncodeOptions encode, string outputPath, bool deinterlace = false)
+    public static List<string> Delogo(MediaInfo info, IReadOnlyList<PixelRect> boxes, double? startSeconds, double? durationSeconds, EncodeOptions encode, string outputPath, bool deinterlace = false) =>
+        Delogo(info, [.. boxes.Select(BoxPath.Fixed)], startSeconds, durationSeconds, encode, outputPath, deinterlace);
+
+    /// <summary>빠른 모드, 박스가 움직일 수 있는 꼴: 움직이는 박스는 프레임마다 자리를 계산하는 식으로 적는다.</summary>
+    public static List<string> Delogo(MediaInfo info, IReadOnlyList<BoxPath> paths, double? startSeconds, double? durationSeconds, EncodeOptions encode, string outputPath, bool deinterlace = false)
     {
         var args = Begin();
         AddInput(args, info.Path, startSeconds, durationSeconds);
         int? subtitles = AddSubtitleInput(args, info, encode, outputPath, 1, startSeconds, durationSeconds);
-        string filter = string.Join(',', boxes.Select(b => string.Create(CultureInfo.InvariantCulture, $"delogo=x={b.X}:y={b.Y}:w={b.Width}:h={b.Height}")));
+        string filter = DelogoFilter(paths, info.Fps.Value, startSeconds);
         // 업스케일러에 넘길 때는 프레임 간격을 일정하게 맞춘다.
         string pre = SourceFilter(info, deinterlace, fixFps: encode.Intermediate);
         if (pre.Length > 0) filter = pre + "," + filter;
         args.AddRange(["-map", $"0:{info.VideoStreamIndex}", "-vf", filter]);
         AddEncode(args, info, encode, outputPath, startSeconds, subtitles);
         return args;
+    }
+
+    /// <summary>
+    /// 박스 경로마다 delogo 하나씩. 움직이는 박스는 x·y·w·h를 식으로 적는다 (delogo가 프레임마다 다시 계산한다):
+    /// 먼저 그 프레임의 원본 기준 번호를 구해 두고(<c>st(0,…)</c> — 구간을 잘라 읽으면 시각이 0부터라 시작 시각만큼 더한다.
+    /// <see cref="FrameGrid.SourceFrame"/>과 같은 계산이다), 네 변을 따로 "첫 자리 + 구간마다 옮겨 간 양"으로 더해 반올림한다.
+    /// <see cref="BoxPath.At"/>과 같은 값이 나온다 — 경로가 프레임마다 잘리는 것이면(<see cref="BoxPath.Bounds"/>) 식에서도 자른다.
+    /// </summary>
+    public static string DelogoFilter(IReadOnlyList<BoxPath> paths, double fps, double? startSeconds)
+    {
+        double start = startSeconds ?? 0;
+        string frame = string.Create(CultureInfo.InvariantCulture,
+            $"0*st(0,max({FrameGrid.FrameAt(start, fps)},ceil(t*{fps:R}+{start * fps:R}-0.5)))");
+        return string.Join(',', paths.Select(path =>
+        {
+            if (!path.Moves)
+            {
+                var b = path.At(0);
+                return string.Create(CultureInfo.InvariantCulture, $"delogo=x={b.X}:y={b.Y}:w={b.Width}:h={b.Height}");
+            }
+            string left = Edge(path, r => r.X), top = Edge(path, r => r.Y);
+            string right = Edge(path, r => r.Right), bottom = Edge(path, r => r.Bottom);
+            string x = $"floor(0.5+{frame}+{left})", x0 = $"floor(0.5+{left})", x1 = $"floor(0.5+{frame}+{right})";
+            string y = $"floor(0.5+{frame}+{top})", y0 = $"floor(0.5+{top})", y1 = $"floor(0.5+{frame}+{bottom})";
+            if (path.Bounds is { } cut)
+            {
+                (x, x0, x1) = (Low(x, cut.X), Low(x0, cut.X), High(x1, cut.Right));
+                (y, y0, y1) = (Low(y, cut.Y), Low(y0, cut.Y), High(y1, cut.Bottom));
+            }
+            return $"delogo=x='{x}':y='{y}':w='{x1}-{x0}':h='{y1}-{y0}'";
+        }));
+
+        static string Low(string value, int limit) => string.Create(CultureInfo.InvariantCulture, $"max({limit},{value})");
+        static string High(string value, int limit) => string.Create(CultureInfo.InvariantCulture, $"min({limit},{value})");
+    }
+
+    /// <summary>박스의 한 변이 프레임 번호(<c>ld(0)</c>)에 따라 가는 값. 옮겨 가지 않는 구간은 적지 않는다.</summary>
+    private static string Edge(BoxPath path, Func<PixelRect, int> edge)
+    {
+        var terms = new List<string> { edge(path.Rects[0]).ToString(CultureInfo.InvariantCulture) };
+        for (int i = 0; i + 1 < path.Rects.Count; i++)
+        {
+            int delta = edge(path.Rects[i + 1]) - edge(path.Rects[i]);
+            if (delta == 0) continue;
+            long from = path.Frames[i], to = path.Frames[i + 1];
+            terms.Add(path.Jump
+                ? string.Create(CultureInfo.InvariantCulture, $"{delta}*gte(ld(0),{to})")
+                : string.Create(CultureInfo.InvariantCulture, $"{delta}*clip((ld(0)-{from})/{to - from},0,1)"));
+        }
+        return Sum(terms, 0, terms.Count);
+    }
+
+    /// <summary>
+    /// 항들을 더하는 식. ffmpeg은 괄호 없이 길게 이은 덧셈을 읽지 못하므로(90항쯤부터 실패한다) 길면 반씩 괄호로 묶는다.
+    /// </summary>
+    private static string Sum(List<string> terms, int from, int to)
+    {
+        if (to - from > 16)
+        {
+            int middle = from + (to - from) / 2;
+            return $"({Sum(terms, from, middle)})+({Sum(terms, middle, to)})";
+        }
+        var text = new StringBuilder(terms[from]);
+        for (int i = from + 1; i < to; i++)
+        {
+            if (terms[i][0] != '-') text.Append('+');
+            text.Append(terms[i]);
+        }
+        return text.ToString();
     }
 
     /// <summary>업스케일만 할 때: 원본(또는 그 구간)을 업스케일러용 중간 영상으로 바꾼다.</summary>

@@ -124,6 +124,8 @@ public sealed class UpdateService
         }
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
+        // 빠른 미리보기의 결과·중간 파일 (보통 창을 닫을 때 지우지만, 꺼지는 바람에 남았을 수 있다). 제거할 때는 다른 창의 것까지.
+        ViewModels.MainViewModel.DeletePreviewFiles(everyone: true);
     }
 
     /// <summary>설치 폴더. 실행 파일은 그 아래 current 폴더에 있다.</summary>

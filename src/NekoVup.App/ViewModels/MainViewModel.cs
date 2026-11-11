@@ -14,6 +14,19 @@ using NekoVup.Core.Settings;
 
 namespace NekoVup.App.ViewModels;
 
+/// <summary>미리보기로 보는 것.</summary>
+public enum PreviewMode
+{
+    /// <summary>원본 (박스를 그리고 고친다)</summary>
+    Original,
+
+    /// <summary>원본·결과 나란히: 세로선 왼쪽은 원본, 오른쪽은 결과</summary>
+    Compare,
+
+    /// <summary>결과만</summary>
+    Result,
+}
+
 public sealed partial class MainViewModel : ObservableObject
 {
     private const int MaxLogLines = 2000;
@@ -72,15 +85,105 @@ public sealed partial class MainViewModel : ObservableObject
     [ObservableProperty]
     public partial double DurationSeconds { get; set; } = 1;
 
+    /// <summary>프레임 하나의 길이(초). 타임라인에서 한 프레임씩 옮길 때 쓴다.</summary>
+    [ObservableProperty]
+    public partial double FrameSeconds { get; set; }
+
     [ObservableProperty]
     public partial double PreviewSeconds { get; set; }
 
     [ObservableProperty]
     public partial string PreviewTimeText { get; set; } = "";
 
-    /// <summary>미리보기로 결과 파일을 볼지 (작업이 끝난 뒤에만 고를 수 있다).</summary>
+    /// <summary>미리보기로 무엇을 볼지: 원본, 원본·결과 나란히(비교), 결과. 비교·결과는 결과가 있을 때만 고를 수 있다.</summary>
     [ObservableProperty]
-    public partial bool PreviewResult { get; set; }
+    [NotifyPropertyChangedFor(nameof(ShowsResult))]
+    public partial PreviewMode PreviewView { get; set; }
+
+    /// <summary>미리보기가 결과 파일을 쓰는지 (비교·결과 보기이고 결과가 있을 때).</summary>
+    public bool ShowsResult => PreviewView != PreviewMode.Original && ResultPath is not null;
+
+    /// <summary>
+    /// 현재 장면 빠른 미리보기로 처리하는 길이(초) — 재생 헤드 앞뒤로 반씩. 프레임마다 따로 처리하는 방식(delogo, Video2X)에만 쓴다.
+    /// 앞뒤 프레임을 함께 보는 방식(ProPainter, 옛 비디오)은 실제 작업의 조각을 통째로 처리한다 (<see cref="ScenePlanner"/>).
+    /// </summary>
+    private const double SceneSeconds = 1.0;
+
+    /// <summary>빠른 미리보기 폴더들의 위 폴더. 창(프로세스)마다 그 아래에 자기 폴더를 둔다.</summary>
+    private static string PreviewRoot => Path.Combine(Path.GetTempPath(), "NekoVup-preview");
+
+    /// <summary>
+    /// 이 창의 빠른 미리보기 결과와 작업 폴더. 출력 폴더를 건드리지 않게 임시 폴더에 두고,
+    /// 창을 둘 띄웠을 때 서로의 파일을 지우지 않게 프로세스마다 따로 쓴다.
+    /// </summary>
+    public static string PreviewFolder => Path.Combine(PreviewRoot, Environment.ProcessId.ToString(CultureInfo.InvariantCulture));
+
+    /// <summary>지금 결과가 빠른 미리보기로 만든 임시 파일인지 (출력 파일이 아니다).</summary>
+    public bool ResultIsPreview { get; private set; }
+
+    /// <summary>
+    /// 이 창의 빠른 미리보기 파일을 지운다. 아직 그림을 뽑느라 붙잡고 있어 못 지운 것은 다음에 지운다.
+    /// 비정상 종료한 창이 남긴 폴더도 함께 치운다. <paramref name="everyone"/>이면 열려 있는 다른 창의 것까지 (프로그램 제거).
+    /// </summary>
+    public static void DeletePreviewFiles(bool everyone = false)
+    {
+        try
+        {
+            if (!Directory.Exists(PreviewRoot)) return;
+            foreach (string folder in Directory.GetDirectories(PreviewRoot))
+            {
+                string name = Path.GetFileName(folder);
+                bool mine = int.TryParse(name, NumberStyles.None, CultureInfo.InvariantCulture, out int id) && id == Environment.ProcessId;
+                if (everyone || mine || !IsOpenWindow(name)) TryDeleteFolder(folder);
+            }
+            // 비었으면 위 폴더도 지운다 (다른 창의 폴더가 남아 있으면 그대로 둔다).
+            if (!Directory.EnumerateFileSystemEntries(PreviewRoot).Any()) Directory.Delete(PreviewRoot);
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+    }
+
+    private static void TryDeleteFolder(string folder)
+    {
+        try
+        {
+            Directory.Delete(folder, recursive: true);
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+    }
+
+    /// <summary>폴더 이름(프로세스 번호)의 주인이 지금 떠 있는 NekoVup 창인지. 번호는 다른 프로그램이 다시 쓸 수 있으므로 이름도 본다.</summary>
+    private static bool IsOpenWindow(string folderName)
+    {
+        if (!int.TryParse(folderName, NumberStyles.None, CultureInfo.InvariantCulture, out int id)) return false;
+        try
+        {
+            using var owner = Process.GetProcessById(id);
+            using var self = Process.GetCurrentProcess();
+            return owner.ProcessName.Equals(self.ProcessName, StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or Win32Exception)
+        {
+            return false; // 그 번호의 프로세스가 없다 (또는 끝나는 중)
+        }
+    }
+
+    /// <summary>실제 작업(시작 단추)이 처리할 프레임 구간. 조각은 이 구간의 처음부터 센다.</summary>
+    private FrameSpan JobFrames(MediaInfo info)
+    {
+        double fps = info.Fps.Value;
+        long total = info.EstimateFrames();
+        if (!RangeOn) return new FrameSpan(0, total);
+        var (start, end) = Range;
+        long first = start > EdgeTolerance ? Math.Min(FrameGrid.FrameAt(start, fps), total - 1) : 0;
+        long last = end < DurationSeconds - EdgeTolerance ? FrameGrid.FrameAt(end, fps) : total;
+        return new FrameSpan(first, Math.Max(1, last - first));
+    }
+
+    /// <summary>재생 헤드가 가리키는 프레임 (원본 기준).</summary>
+    private long PlayheadFrame(MediaInfo info) =>
+        Math.Min(FrameGrid.FrameAt(PreviewSeconds, info.Fps.Value), Math.Max(0, info.EstimateFrames() - 1));
 
     // ───────── 옵션 ─────────
 
@@ -92,19 +195,43 @@ public sealed partial class MainViewModel : ObservableObject
     [NotifyPropertyChangedFor(nameof(RangeText))]
     public partial bool RangeOn { get; set; }
 
-    /// <summary>구간의 시작(초, 원본 기준). 숫자 칸·타임라인 손잡이·I 키가 바꾼다.</summary>
+    /// <summary>구간의 시작(초, 원본 기준). 시각 칸·타임라인 손잡이·I 키가 바꾼다.</summary>
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(TimelineRangeStart))]
     [NotifyPropertyChangedFor(nameof(TimelineRangeEnd))]
     [NotifyPropertyChangedFor(nameof(RangeText))]
+    [NotifyPropertyChangedFor(nameof(RangeStartText))]
     public partial double RangeStart { get; set; }
 
-    /// <summary>구간의 끝(초, 원본 기준). 숫자 칸·타임라인 손잡이·O 키가 바꾼다.</summary>
+    /// <summary>구간의 끝(초, 원본 기준). 시각 칸·타임라인 손잡이·O 키가 바꾼다.</summary>
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(TimelineRangeStart))]
     [NotifyPropertyChangedFor(nameof(TimelineRangeEnd))]
     [NotifyPropertyChangedFor(nameof(RangeText))]
+    [NotifyPropertyChangedFor(nameof(RangeEndText))]
     public partial double RangeEnd { get; set; }
+
+    /// <summary>구간 시작 칸에 보이는 글자 — 분:초 (사용자 요청: 초로만 적혀 있으면 읽기 어렵다).</summary>
+    public string RangeStartText => TimeText.Format(Clamp(RangeStart, 0, DurationSeconds, 0));
+
+    public string RangeEndText => TimeText.Format(Clamp(RangeEnd, 0, DurationSeconds, DurationSeconds));
+
+    /// <summary>시작 칸에 적은 시각("1:23.5", "1분 23초", 숫자만 적으면 초)을 구간에 넣는다. 읽을 수 없으면 그대로 둔다.</summary>
+    public void EnterRangeStart(string text) => RangeStart = EnteredTime(text, RangeStart);
+
+    public void EnterRangeEnd(string text) => RangeEnd = EnteredTime(text, RangeEnd);
+
+    /// <summary>
+    /// 칸에 적은 시각. 보이던 글자 그대로면 값을 건드리지 않는다 — 칸에는 0.01초까지만 보여, 다시 읽어 넣으면
+    /// 영상 끝에 붙여 둔 구간이 "끝까지"가 아니게 깎인다.
+    /// </summary>
+    private double EnteredTime(string text, double current)
+    {
+        if (!TimeText.TryParse(text, out double seconds)) return current;
+        seconds = Math.Min(seconds, DurationSeconds);
+        if (double.IsFinite(current) && TimeText.Format(seconds) == TimeText.Format(current)) return current;
+        return seconds >= DurationSeconds - EdgeTolerance ? DurationSeconds : seconds;
+    }
 
     /// <summary>처리할 구간의 가장 짧은 길이(초).</summary>
     private const double MinRangeSeconds = 0.1;
@@ -160,7 +287,7 @@ public sealed partial class MainViewModel : ObservableObject
             if (!RangeOn) return "영상 전체를 처리합니다.";
             var (start, end) = Range;
             return string.Create(CultureInfo.InvariantCulture,
-                $"{FormatTime(start)} ~ {FormatTime(end)} ({end - start:0.0}초)만 처리합니다. 타임라인 구간 양 끝의 손잡이를 끌거나, 타임라인을 누른 뒤 I(시작)·O(끝) 키로도 정합니다.");
+                $"{TimeText.Format(start)} ~ {TimeText.Format(end)} (길이 {TimeText.Length(end - start)})만 처리합니다. 칸에는 분:초로 적습니다 (예: 1:23.5 · 숫자만 적으면 초). 타임라인 구간 양 끝의 손잡이를 끌거나, 타임라인을 누른 뒤 I(시작)·O(끝) 키로도 정합니다.");
         }
     }
 
@@ -221,8 +348,8 @@ public sealed partial class MainViewModel : ObservableObject
 
     public string RemoveHint => Mode switch
     {
-        CleanMode.ProPainter => "고정 로고를 주변 화면으로 복원 · ProPainter",
-        CleanMode.Delogo => "고정 로고를 빠르게 뭉개서 지움 · delogo",
+        CleanMode.ProPainter => "로고·워터마크를 주변 화면으로 복원 · ProPainter",
+        CleanMode.Delogo => "로고·워터마크를 빠르게 뭉개서 지움 · delogo",
         _ => "꺼 두면 화면은 그대로 두고 업스케일만 합니다",
     };
 
@@ -346,6 +473,7 @@ public sealed partial class MainViewModel : ObservableObject
     public partial string EtaText { get; set; } = "";
 
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(ShowsResult))]
     public partial bool HasResult { get; set; }
 
     public string? ResultPath { get; private set; }
@@ -430,10 +558,13 @@ public sealed partial class MainViewModel : ObservableObject
             InputPath = info.Path;
             FileName = Path.GetFileName(info.Path);
             DurationSeconds = Math.Max(info.DurationSeconds, 0.1);
-            PreviewResult = false;
+            FrameSeconds = 1 / info.Fps.Value;
+            PreviewView = PreviewMode.Original;
             HasResult = false;
             ResultPath = null;
-            _resultRange = null;
+            ResultIsPreview = false;
+            _resultWindow = null;
+            DeletePreviewFiles(); // 앞 영상의 빠른 미리보기는 더 쓸 데가 없다
             Boxes.Clear();
             // 구간은 영상마다 다르다 — 새 영상에서는 꺼 두고, 켜면 그 영상에서 다시 잡는다.
             RangeOn = false;
@@ -497,6 +628,10 @@ public sealed partial class MainViewModel : ObservableObject
                 case "--box" when PixelRect.TryParse(value, out var box) && !box.IsEmpty:
                     AddBox(box);
                     break;
+                // 움직이는 워터마크: "시각=x,y,w,h;시각=x,y,w,h". --move는 사이를 이어 가고, --jump는 그 시각에 한 번에 옮긴다.
+                case "--move" or "--jump" when BoxTrack.TryParse(value, name == "--jump", out var track):
+                    AddTrack(track);
+                    break;
                 case "--mode":
                     (RemoveOn, RemoveMethodIndex) = value.ToLowerInvariant() switch { "delogo" => (true, 1), "none" => (false, RemoveMethodIndex), _ => (true, 0) };
                     break;
@@ -513,11 +648,11 @@ public sealed partial class MainViewModel : ObservableObject
                 case "--scale" when int.TryParse(value, out int scale) && scale is >= 2 and <= 4:
                     ScaleIndex = scale - 2;
                     break;
-                // 처리할 구간: --start 시작(초), --duration(= --test-seconds) 길이(초). 명령줄 판과 같은 이름이다.
-                case "--start" when double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out double begin) && double.IsFinite(begin) && begin >= 0:
+                // 처리할 구간: --start 시작, --duration(= --test-seconds) 길이. 초("90")나 분:초("1:30"). 명령줄 판과 같은 이름이다.
+                case "--start" when TimeText.TryParse(value, out double begin):
                     rangeStart = begin;
                     break;
-                case "--duration" or "--test-seconds" when double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out double seconds) && double.IsFinite(seconds) && seconds > 0:
+                case "--duration" or "--test-seconds" when TimeText.TryParse(value, out double seconds) && seconds > 0:
                     rangeLength = seconds;
                     break;
                 case "--output" when value.Trim().Length > 0:
@@ -534,15 +669,23 @@ public sealed partial class MainViewModel : ObservableObject
         }
     }
 
-    /// <summary>미리보기용 프레임(PNG 바이트). 실패하면 null.</summary>
-    public async Task<byte[]?> GetPreviewAsync(double seconds, CancellationToken cancellationToken)
+    /// <summary>미리보기용 프레임(PNG 바이트). <paramref name="result"/>면 결과 파일에서 같은 순간을 뽑는다. 실패하면 null.</summary>
+    public async Task<byte[]?> GetPreviewAsync(double seconds, bool result, CancellationToken cancellationToken)
     {
-        bool result = PreviewResult && ResultPath is not null;
+        result &= ResultPath is not null;
         string? path = result ? ResultPath : Info?.Path;
         if (path is null) return null;
-        // 구간만 처리한 결과는 그 구간의 시작이 0초다 — 원본 시각을 결과 파일의 시각으로 옮긴다.
-        // 결과 밖의 시각을 달라고 하면 그림이 나오지 않아 원본 화면이 그대로 남는다.
-        if (result) seconds = ToResultTime(seconds);
+        if (Info is { DurationSeconds: > 0 } info)
+        {
+            // 마지막 프레임보다 뒤의 시각(타임라인의 맨 끝)에서는 그림이 나오지 않는다 — 마지막 프레임을 뽑는다.
+            seconds = Math.Min(seconds, FrameGrid.PickSeconds(Math.Max(0, info.EstimateFrames() - 1), info.Fps.Value));
+        }
+        // 구간만 처리한 결과는 그 구간의 시작이 0초다 — 원본과 결과에서 같은 프레임을 뽑도록 프레임 번호로 옮긴다.
+        if (_resultWindow is { } window)
+        {
+            long frame = FrameGrid.FrameAt(seconds, window.Fps);
+            seconds = FrameGrid.PickSeconds(result ? window.View.Clamp(frame) - window.File.First : frame, window.Fps);
+        }
         try
         {
             return await _runner.CaptureBytesAsync(new ToolInvocation(BundledTools.Resolve(Settings).Ffmpeg, FfmpegCommands.PreviewFrame(path, seconds)), cancellationToken);
@@ -553,36 +696,69 @@ public sealed partial class MainViewModel : ObservableObject
         }
     }
 
-    partial void OnPreviewSecondsChanged(double value) => PreviewTimeText = FormatTime(value) + " / " + FormatTime(DurationSeconds);
-
-    /// <summary>결과 파일이 담은 원본 구간 (원본 기준 시작, 길이). 영상 전체를 처리했으면 null.</summary>
-    private (double Start, double Length)? _resultRange;
-
-    /// <summary>길이가 이만큼인 파일에서 그림을 뽑을 수 있는 마지막 시각 (끝에서 조금 앞).</summary>
-    private static double LastPreviewable(double length) => Math.Max(0, length - 0.5);
-
-    /// <summary>원본 시각 → 결과 파일에서 그림을 뽑을 시각. 결과 구간 밖이면 가까운 끝으로.</summary>
-    private double ToResultTime(double seconds) =>
-        _resultRange is { } range ? Math.Clamp(seconds - range.Start, 0, LastPreviewable(range.Length)) : seconds;
-
-    /// <summary>결과를 보는 중이면 원본 시각을 결과가 담은 구간 안으로 당긴다.</summary>
-    private double ClampToResult(double seconds) =>
-        _resultRange is { } range ? Math.Clamp(seconds, range.Start, range.Start + LastPreviewable(range.Length)) : seconds;
+    partial void OnPreviewSecondsChanged(double value)
+    {
+        PreviewTimeText = FormatTime(value) + " / " + FormatTime(DurationSeconds);
+        FollowBoxes();
+    }
 
     /// <summary>
-    /// 미리보기 시각을 옮긴다. 구간만 처리한 결과를 보는 중이면 그 구간 밖으로 나가지 않는다 —
-    /// 나가면 표시는 그 시각인데 화면은 결과의 첫·마지막 장면인 채로 남는다.
+    /// 결과 파일이 담은 원본 구간. <paramref name="File"/>은 파일에 든 프레임, <paramref name="View"/>는 그 가운데 볼 수 있는 부분
+    /// (빠른 미리보기에서는 실제 렌더링과 같게 나오는 부분만 — <see cref="ScenePlan.Exact"/>).
+    /// </summary>
+    private readonly record struct ResultWindow(FrameSpan File, FrameSpan View, double Fps)
+    {
+        public bool Contains(double seconds) => View.Contains(FrameGrid.FrameAt(seconds, Fps));
+        public double Clamp(double seconds) => Contains(seconds) ? seconds : FrameGrid.TimeOf(View.Clamp(FrameGrid.FrameAt(seconds, Fps)), Fps);
+
+        /// <summary>
+        /// 실제로 만들어진 프레임 수에 맞춘다. 영상 정보의 길이로 어림한 수와 다를 수 있다 (끝까지 처리한 때) —
+        /// 그대로 두면 파일에 없는 프레임을 보려다 빈 화면이 나온다.
+        /// </summary>
+        public ResultWindow Fit(long frames)
+        {
+            if (frames <= 0 || frames == File.Count) return this;
+            var file = File with { Count = frames };
+            long first = Math.Min(View.First, file.End - 1);
+            long end = View.End >= File.End ? file.End : Math.Min(View.End, file.End);
+            return this with { File = file, View = new FrameSpan(first, Math.Max(1, end - first)) };
+        }
+    }
+
+    /// <summary>결과 파일이 담은 원본 구간. 영상 전체를 처리했으면 null.</summary>
+    private ResultWindow? _resultWindow;
+
+    /// <summary>결과를 보는 중이면 원본 시각을 결과가 담은 구간 안으로 당긴다.</summary>
+    private double ClampToResult(double seconds) => ResultHas(seconds) ? seconds : _resultWindow!.Value.Clamp(seconds);
+
+    /// <summary>
+    /// 결과가 그 시각의 장면을 담고 있는지. 타임라인의 맨 끝(마지막 프레임보다 뒤)은 마지막 프레임으로 본다 — 재생 헤드가 가리키는
+    /// 프레임과 같게. 안 그러면 끝까지 처리한 결과를 보다가 맨 끝으로 가면 원본으로 돌아간다.
+    /// </summary>
+    private bool ResultHas(double seconds)
+    {
+        if (_resultWindow is not { } window) return true;
+        if (Info is { DurationSeconds: > 0 } info)
+            seconds = Math.Min(seconds, FrameGrid.TimeOf(Math.Max(0, info.EstimateFrames() - 1), info.Fps.Value));
+        return window.Contains(seconds);
+    }
+
+    /// <summary>
+    /// 미리보기 시각을 옮긴다. 결과가 담지 않은 곳(구간 밖, 빠른 미리보기로 처리한 장면 밖)을 누르면 원본 보기로 돌아간다 —
+    /// 결과에 붙잡아 두면 다른 장면을 보러 갈 수 없고, 그냥 두면 표시는 그 시각인데 화면은 결과의 첫·마지막 장면인 채로 남는다.
     /// </summary>
     public void SeekPreview(double seconds)
     {
-        if (PreviewResult && ResultPath is not null) seconds = ClampToResult(seconds);
+        // 영상 밖의 시각(명령줄로 받은 움직이는 박스의 자리가 영상 끝보다 뒤일 수 있다)은 끝으로 당긴다.
+        seconds = Math.Clamp(seconds, 0, Math.Max(0, DurationSeconds));
+        if (ShowsResult && !ResultHas(seconds)) PreviewView = PreviewMode.Original;
         PreviewSeconds = seconds;
     }
 
-    partial void OnPreviewResultChanged(bool value)
+    partial void OnPreviewViewChanged(PreviewMode value)
     {
-        // 결과 구간 밖의 시각을 보고 있었으면 안으로 옮긴다 — 안 그러면 "결과"로 바꿔도 화면이 그대로다.
-        if (value && ResultPath is not null) PreviewSeconds = ClampToResult(PreviewSeconds);
+        // 결과 구간 밖의 시각을 보고 있었으면 안으로 옮긴다 — 안 그러면 비교·결과로 바꿔도 결과 쪽 화면이 그대로다.
+        if (ShowsResult) PreviewSeconds = ClampToResult(PreviewSeconds);
     }
 
     // ═════════════════════ 박스 ═════════════════════
@@ -590,9 +766,50 @@ public sealed partial class MainViewModel : ObservableObject
     public BoxViewModel AddBox(PixelRect rect)
     {
         var box = new BoxViewModel(rect);
+        if (Info is { } info) box.ShowAt(PlayheadFrame(info));
         Boxes.Add(box);
         return box;
     }
+
+    /// <summary>움직이는 박스를 넣는다 (명령줄의 --move, --jump).</summary>
+    private void AddTrack(BoxTrack track)
+    {
+        if (Info is not { } info) return;
+        try
+        {
+            // 숫자 칸은 화면 밖의 값을 담지 못한다 (0보다 작으면 0으로 고쳐 적는다) — 화면에 걸치는 동안의 자리를 화면 안으로 잘라서 넣는다.
+            var screen = new PixelRect(0, 0, info.Width, info.Height);
+            if (BoxPath.From(track, info.Fps.Value).ClampTo(screen)?.Flatten() is not { } path) return;
+            // 영상 끝보다 뒤에 적은 자리에는 재생 헤드가 닿지 못한다 (가 볼 수도, 지울 수도 없다) — 마지막 프레임에서의 자리로 바꿔 둔다.
+            long end = info.DurationSeconds > 0 ? Math.Max(0, info.EstimateFrames() - 1) : long.MaxValue;
+            var keys = path.Frames.Select(frame => Math.Min(frame, end)).Distinct().Select(frame => KeyValuePair.Create(frame, path.At(frame)));
+            var box = new BoxViewModel();
+            box.Load(BoxPath.FromFrames(keys, path.Jump), PlayheadFrame(info));
+            Boxes.Add(box);
+        }
+        catch (ArgumentException)
+        {
+            // 쓸 수 있는 자리가 하나도 없다
+        }
+    }
+
+    /// <summary>움직이는 박스를 지금 보는 장면에서의 자리로 옮긴다.</summary>
+    private void FollowBoxes()
+    {
+        if (Info is not { } info || Boxes.Count == 0) return;
+        long frame = PlayheadFrame(info);
+        // 자리만 따라 옮기는 것이라 처리 영역은 그대로다 — 화면만 다시 그린다.
+        _following = true;
+        foreach (var box in Boxes) box.ShowAt(frame);
+        _following = false;
+        if (Boxes.Any(b => b.Moving)) OverlayChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    private bool _following;
+
+    /// <summary>움직이는 박스에서, 지금 장면의 앞(-1)·뒤(+1)에 맞춰 둔 자리가 있는 시각. 없으면 null.</summary>
+    public double? KeySeconds(BoxViewModel box, int direction) =>
+        Info is { } info && box.NeighborKey(direction) is { } frame ? FrameGrid.TimeOf(frame, info.Fps.Value) : null;
 
     public void AddDefaultBox()
     {
@@ -610,7 +827,10 @@ public sealed partial class MainViewModel : ObservableObject
         UpdateDerived();
     }
 
-    private void OnBoxPropertyChanged(object? sender, PropertyChangedEventArgs e) => UpdateDerived();
+    private void OnBoxPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (!_following && e.PropertyName != nameof(BoxViewModel.KeyText)) UpdateDerived();
+    }
 
     partial void OnRemoveOnChanged(bool value) => UpdateDerived();
     partial void OnRemoveMethodIndexChanged(int value) => UpdateDerived();
@@ -634,7 +854,7 @@ public sealed partial class MainViewModel : ObservableObject
     /// </summary>
     private void OnRangeEdited()
     {
-        if (PreviewResult) PreviewResult = false;
+        if (PreviewView != PreviewMode.Original) PreviewView = PreviewMode.Original;
         UpdateDerived();
     }
 
@@ -654,12 +874,14 @@ public sealed partial class MainViewModel : ObservableObject
                 ? string.Create(CultureInfo.InvariantCulture, $"{info.Width}×{info.Height} → {info.Width * scale}×{info.Height * scale}")
                 : "";
 
-            var boxes = Boxes.Select(b => b.ToRect()).Where(r => !r.IsEmpty).ToList();
-            if (Mode == CleanMode.ProPainter && boxes.Count > 0)
+            var paths = Boxes.Select(b => b.ToPath()).OfType<BoxPath>().ToList();
+            if (Mode == CleanMode.ProPainter && paths.Count > 0)
             {
                 try
                 {
-                    var regions = RegionPlanner.Plan(boxes, info.Width, info.Height, BuildRegionOptions());
+                    // 움직이는 박스는 지나가는 자리를 모두 덮게 영역을 잡는다
+                    var plan = MotionPlan.Create(paths, info.Width, info.Height, BuildRegionOptions());
+                    var regions = plan.Regions;
                     RegionRects = [.. regions.Select(r => r.Rect)];
                     var (rangeStart, rangeLength) = JobRange();
                     long frames = info.EstimateFrames(rangeStart, rangeLength);
@@ -670,8 +892,12 @@ public sealed partial class MainViewModel : ObservableObject
                     if (large.Count > 0)
                     {
                         HasRegionWarning = true;
+                        bool roams = Enumerable.Range(0, regions.Count).Any(i => regions[i].NeedsResize && plan.Moves(i));
+                        string advice = roams
+                            ? "워터마크가 지나가는 자리가 넓어서 그렇습니다 — 넓게 돌아다니는 워터마크는 delogo 방식이 더 깔끔할 수 있습니다."
+                            : "박스를 줄이거나 여백을 낮춰 보세요.";
                         RegionWarning = string.Create(CultureInfo.InvariantCulture,
-                            $"처리 영역이 면적 상한({BuildRegionOptions().MaxArea:N0}px)을 넘어 {large.Min(r => r.ResizeRatio):0.##}배로 줄여서 복원합니다. 그 부분이 조금 흐려질 수 있습니다. 박스를 줄이거나 여백을 낮춰 보세요.");
+                            $"처리 영역이 면적 상한({BuildRegionOptions().MaxArea:N0}px)을 넘어 {large.Min(r => r.ResizeRatio):0.##}배로 줄여서 복원합니다. 그 부분이 조금 흐려질 수 있습니다. {advice}");
                     }
                 }
                 catch (ArgumentException ex)
@@ -693,11 +919,17 @@ public sealed partial class MainViewModel : ObservableObject
 
     public bool CanStart => HasVideo && !IsRunning && !IsUpdating;
 
-    private JobRequest? BuildRequest()
+    /// <summary>
+    /// 화면의 설정으로 작업 요청을 만든다. <paramref name="scene"/>이면 재생 헤드 둘레만 임시 폴더로 처리하는 빠른 미리보기.
+    /// <paramref name="window"/>는 결과 파일이 담을 원본 구간 (영상 전체면 null).
+    /// </summary>
+    private JobRequest? BuildRequest(bool scene, out ResultWindow? window)
     {
+        window = null;
         if (Info is null) return null;
         var (mode, upscale) = (Mode, Upscale);
-        var boxes = Boxes.Select(b => b.ToRect()).Where(r => !r.IsEmpty).ToList();
+        var boxes = Boxes.Where(b => !b.HasTrack).Select(b => b.ToRect()).Where(r => !r.IsEmpty).ToList();
+        var tracks = Boxes.Select(b => b.ToTrack(Info.Fps.Value)).OfType<BoxTrack>().ToList();
 
         if (mode == CleanMode.None && upscale == UpscalePreset.None)
         {
@@ -721,52 +953,112 @@ public sealed partial class MainViewModel : ObservableObject
             ShowError("파이썬 환경(ProPainter)이 준비되지 않았습니다. 옛 비디오 방식과 ProPainter에 필요합니다. 설정 → 도구에서 [ProPainter 자동 준비]를 누르세요.");
             return null;
         }
-        if (mode != CleanMode.None && boxes.Count == 0)
+        if (mode != CleanMode.None && boxes.Count == 0 && tracks.Count == 0)
         {
             ShowError("워터마크 위치가 없습니다. 미리보기 위에서 끌어서 박스를 그리거나 워터마크 제거를 끄세요.");
             return null;
         }
-        if (RangeOn && !CanUseRange)
+        if (scene)
         {
-            ShowError("영상 길이를 알 수 없는 파일이라 구간을 고를 수 없습니다. '일부 구간만 처리'를 끄고 전체를 처리하세요.");
-            return null;
+            // 빠른 미리보기: 구간·출력 파일은 쓰지 않는다 (재생 헤드 둘레만 임시 폴더에 처리한다).
+            if (!CanUseRange)
+            {
+                ShowError("영상 길이를 알 수 없는 파일이라 장면을 골라 미리 처리할 수 없습니다.");
+                return null;
+            }
         }
-        // 손잡이로 줄일 수 있는 가장 짧은 구간(0.1초)도 받는다 — 부동소수점 오차로 0.0999…가 되어도.
-        if (RangeOn && Range.End - Range.Start < MinRangeSeconds - 1e-6)
+        else
         {
-            ShowError("처리할 구간이 너무 짧습니다. 타임라인에서 구간의 시작과 끝을 다시 정하세요.");
-            return null;
+            if (RangeOn && !CanUseRange)
+            {
+                ShowError("영상 길이를 알 수 없는 파일이라 구간을 고를 수 없습니다. '일부 구간만 처리'를 끄고 전체를 처리하세요.");
+                return null;
+            }
+            // 손잡이로 줄일 수 있는 가장 짧은 구간(0.1초)도 받는다 — 부동소수점 오차로 0.0999…가 되어도.
+            if (RangeOn && Range.End - Range.Start < MinRangeSeconds - 1e-6)
+            {
+                ShowError("처리할 구간이 너무 짧습니다. 타임라인에서 구간의 시작과 끝을 다시 정하세요.");
+                return null;
+            }
+            if (Unquote(OutputPath).Length == 0)
+            {
+                ShowError("출력 파일을 지정하세요.");
+                return null;
+            }
         }
-        if (Unquote(OutputPath).Length == 0)
-        {
-            ShowError("출력 파일을 지정하세요.");
-            return null;
-        }
-        if (ResolveOutputPath() is not { } output)
+        string? output = scene
+            // 이름을 매번 다르게 한다 — 앞 미리보기 파일을 아직 그림을 뽑느라 붙잡고 있을 수 있다.
+            ? Path.Combine(PreviewFolder, string.Create(CultureInfo.InvariantCulture, $"scene-{Environment.TickCount64}.mkv"))
+            : ResolveOutputPath();
+        if (output is null)
         {
             ShowError("출력 파일 경로가 올바르지 않습니다: " + Unquote(OutputPath));
             return null;
+        }
+        var options = new JobOptions
+        {
+            Mode = mode,
+            Upscale = upscale,
+            Scale = ScaleIndex + 2,
+            Region = BuildRegionOptions(),
+            ChunkLength = (int)Clamp(ChunkLength, 20, 1000, 100),
+            Overlap = (int)Clamp(Overlap, 0, 200, 10),
+            SubvideoLength = (int)Clamp(SubvideoLength, 10, 500, 40),
+            Crf = (int)Clamp(Crf, 0, 40, 18),
+            Sharpen = (int)Clamp(Sharpen, 0, FfmpegCommands.MaxSharpen, 0),
+            Deinterlace = DeinterlaceMode,
+        };
+
+        // 처리할 구간은 프레임 번호로 정한다 — 초로만 넘기면 결과의 첫 프레임이 어느 것인지가 반올림에 달려,
+        // 미리보기에서 원본과 결과가 한 프레임씩 어긋난다.
+        double fps = Info.Fps.Value;
+        var job = JobFrames(Info);
+        bool toEnd = !RangeOn || Range.End >= DurationSeconds - EdgeTolerance;
+        var frames = job;
+        if (scene)
+        {
+            long playhead = PlayheadFrame(Info);
+            int sceneFrames = Math.Max(1, (int)Math.Round(SceneSeconds * fps));
+            // 길이를 모르는 영상은 프레임 수도 모른다 — 맨 앞의 한 장면만 처리한다 ("끝까지"로 넘기면 영상 전체를 처리하게 된다).
+            bool known = Info.DurationSeconds > 0;
+            if (!known) job = new FrameSpan(0, sceneFrames);
+            // 재생 헤드가 고른 구간 밖이면 그 장면은 영상 전체를 처리할 때의 모습으로 보여 준다.
+            else if (!job.Contains(playhead)) job = new FrameSpan(0, Info.EstimateFrames());
+            ScenePlan plan;
+            try
+            {
+                if (mode == CleanMode.ProPainter) JobRunner.ValidateProPainterOptions(options);
+                plan = ScenePlanner.Plan(playhead, job, sceneFrames,
+                    mode == CleanMode.ProPainter, upscale == UpscalePreset.OldVideo, options.ChunkLength, options.Overlap);
+            }
+            catch (JobException ex)
+            {
+                ShowError(ex.Message);
+                return null;
+            }
+            // 장면이 작업의 끝에 닿았으면 길이를 주지 않는다 (아래와 같은 까닭).
+            toEnd = known && job.End >= Info.EstimateFrames() && plan.File.End >= job.End;
+            frames = plan.File;
+            window = new ResultWindow(plan.File, plan.Exact, fps);
+        }
+        else if (RangeOn)
+        {
+            window = new ResultWindow(job, job, fps);
         }
 
         return new JobRequest
         {
             InputPath = Info.Path,
             OutputPath = output,
+            // 빠른 미리보기의 중간 파일도 임시 폴더에 — 출력 폴더(.nekovup)나 OneDrive를 건드리지 않게
+            WorkDirectory = scene ? Path.Combine(PreviewFolder, "work") : null,
             Boxes = mode == CleanMode.None ? [] : boxes,
-            Options = new JobOptions
+            Tracks = mode == CleanMode.None ? [] : tracks,
+            Options = options with
             {
-                Mode = mode,
-                Upscale = upscale,
-                Scale = ScaleIndex + 2,
-                StartSeconds = JobRange().Start,
-                DurationSeconds = JobRange().Length,
-                Region = BuildRegionOptions(),
-                ChunkLength = (int)Clamp(ChunkLength, 20, 1000, 100),
-                Overlap = (int)Clamp(Overlap, 0, 200, 10),
-                SubvideoLength = (int)Clamp(SubvideoLength, 10, 500, 40),
-                Crf = (int)Clamp(Crf, 0, 40, 18),
-                Sharpen = (int)Clamp(Sharpen, 0, FfmpegCommands.MaxSharpen, 0),
-                Deinterlace = DeinterlaceMode,
+                StartSeconds = FrameGrid.SeekSeconds(frames.First, fps),
+                // 끝까지 고른 것은 길이를 주지 않는다 — 영상 정보의 길이가 실제 마지막 프레임보다 조금 짧으면 끝 장면이 잘린다.
+                DurationSeconds = toEnd ? null : FrameGrid.LengthSeconds(frames.First, frames.Count, fps),
             },
         };
     }
@@ -824,7 +1116,16 @@ public sealed partial class MainViewModel : ObservableObject
     public Task WaitForJobAsync(TimeSpan timeout) =>
         _jobDone is { } done ? Task.WhenAny(done.Task, Task.Delay(timeout)) : Task.CompletedTask;
 
-    public async Task StartAsync()
+    public Task StartAsync() => RunJobAsync(scene: false);
+
+    /// <summary>
+    /// 현재 장면 빠른 미리보기: 재생 헤드 둘레만 지금 설정으로 처리해 비교 보기로 보여 준다 (사용자 요청).
+    /// 실제 작업과 같은 처리 과정·같은 조각(<see cref="ScenePlanner"/>)을 쓰므로 보이는 것이 렌더링 결과와 같다.
+    /// ProPainter와 옛 비디오를 함께 켠 때만 옛 비디오의 조각 자리가 실제와 달라 조금 다를 수 있다. 출력 파일은 만들지 않는다.
+    /// </summary>
+    public Task PreviewSceneAsync() => RunJobAsync(scene: true);
+
+    private async Task RunJobAsync(bool scene)
     {
         if (IsRunning) return;
         if (IsUpdating)
@@ -833,15 +1134,17 @@ public sealed partial class MainViewModel : ObservableObject
             return;
         }
         ClearMessage();
-        var request = BuildRequest();
+        var request = BuildRequest(scene, out var window);
         if (request is null) return;
 
         Log.Clear();
         HasRun = true;
         HasResult = false;
-        PreviewResult = false;
+        PreviewView = PreviewMode.Original;
         ResultPath = null;
-        _resultRange = null;
+        ResultIsPreview = false;
+        _resultWindow = null;
+        if (scene) DeletePreviewFiles();
         _jobDone = new TaskCompletionSource();
         IsRunning = true;
         StageText = "준비 중";
@@ -870,28 +1173,37 @@ public sealed partial class MainViewModel : ObservableObject
         {
             var result = await Task.Run(() => jobRunner.RunAsync(request, progress, token), token);
             ResultPath = result.OutputPath;
-            // 구간만 처리했으면 결과 파일의 0초가 원본의 구간 시작이다 (미리보기에서 원본 시각과 맞춰 보여 준다).
-            if (request.Options.StartSeconds is not null || request.Options.DurationSeconds is not null)
-            {
-                double start = request.Options.StartSeconds ?? 0;
-                _resultRange = (start, request.Options.DurationSeconds ?? Math.Max(0, DurationSeconds - start));
-            }
+            // 구간만 처리했으면 결과 파일의 첫 프레임이 원본의 구간 시작이다 (미리보기에서 원본 프레임과 맞춰 보여 준다).
+            _resultWindow = window?.Fit(result.FrameCount);
+            ResultIsPreview = scene;
             HasResult = true;
-            StageText = "완료";
+            StageText = scene ? "미리보기 완료" : "완료";
             DetailText = string.Create(CultureInfo.InvariantCulture, $"{result.FrameCount}프레임 · {EtaEstimator.Format(result.Elapsed)} 걸림");
             StageProgress = 100;
             TotalProgress = 100;
             TotalText = "100%";
             EtaText = "";
-            StatusText = "완료";
-            ShowInfo("완료했습니다: " + result.OutputPath);
+            StatusText = scene ? "미리보기 완료" : "완료";
+            if (scene)
+            {
+                // 차이가 한눈에 보이게 원본·결과 나란히 보기로 연다
+                PreviewView = PreviewMode.Compare;
+                string span = _resultWindow is { } shown
+                    ? $" ({FormatTime(FrameGrid.TimeOf(shown.View.First, shown.Fps))} ~ {FormatTime(FrameGrid.TimeOf(shown.View.End, shown.Fps))})"
+                    : "";
+                ShowInfo($"이 장면{span}을 지금 설정으로 처리해 봤습니다 (출력 파일은 만들지 않았습니다). 미리보기의 세로선을 끌어 원본과 비교하세요.");
+            }
+            else
+            {
+                ShowInfo("완료했습니다: " + result.OutputPath);
+            }
         }
         catch (OperationCanceledException)
         {
             StageText = "취소됨";
             StatusText = "중지됨";
             EtaText = "";
-            string note = ResumeNote(request);
+            string note = scene ? "" : ResumeNote(request); // 빠른 미리보기는 이어서 하지 않는다 (매번 새로 처리한다)
             ShowInfo(note.Length > 0 ? "취소했습니다. " + note : "취소했습니다.");
         }
         catch (Exception ex) when (ex is JobException or ToolFailedException or IOException or UnauthorizedAccessException)
@@ -901,7 +1213,7 @@ public sealed partial class MainViewModel : ObservableObject
             StatusText = "실패 — 로그를 확인하세요";
             EtaText = "";
             AppendLog("✖ " + ex.Message);
-            ShowError(FirstLine(ex.Message) + RetryHint(ex, ResumeNote(request)));
+            ShowError(FirstLine(ex.Message) + RetryHint(ex, scene ? "" : ResumeNote(request)));
         }
         catch (Exception ex)
         {
@@ -911,7 +1223,7 @@ public sealed partial class MainViewModel : ObservableObject
             StatusText = "실패 — 로그를 확인하세요";
             EtaText = "";
             AppendLog("✖ " + ex);
-            ShowError("예기치 못한 오류: " + FirstLine(ex.Message) + RetryHint(ex, ResumeNote(request)));
+            ShowError("예기치 못한 오류: " + FirstLine(ex.Message) + RetryHint(ex, scene ? "" : ResumeNote(request)));
         }
         finally
         {

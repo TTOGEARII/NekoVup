@@ -99,6 +99,8 @@ public sealed partial class MainWindow : Window
     private async void OnClosed(object sender, WindowEventArgs e)
     {
         ViewModel.CancelSetup();
+        // 빠른 미리보기 파일(임시 폴더)은 창을 닫을 때 지운다. 작업 중이면 그 작업이 끝난 뒤에.
+        if (!ViewModel.IsRunning) MainViewModel.DeletePreviewFiles();
         if (_closing || !ViewModel.IsRunning) return;
 
         _closing = true;
@@ -108,6 +110,7 @@ public sealed partial class MainWindow : Window
         {
             ViewModel.Cancel();
             await ViewModel.WaitForJobAsync(TimeSpan.FromSeconds(5));
+            MainViewModel.DeletePreviewFiles();
         }
         catch (Exception ex)
         {
@@ -148,6 +151,12 @@ public sealed partial class MainWindow : Window
             case nameof(MainViewModel.IsRunning) or nameof(MainViewModel.RemoveOn):
                 UpdateEditorState();
                 break;
+            case nameof(MainViewModel.PreviewView) or nameof(MainViewModel.ShowsResult):
+                // 뷰모델이 보기를 바꿨으면(미리보기 처리가 끝나 비교로, 새 작업·새 영상이라 원본으로) 선택 단추도 맞춘다
+                (ViewModel.PreviewView switch { PreviewMode.Compare => ViewCompare, PreviewMode.Result => ViewResult, _ => ViewOriginal }).IsChecked = true;
+                UpdateEditorState();
+                RequestPreview();
+                break;
             case nameof(MainViewModel.IsDark):
                 ApplyTheme();
                 break;
@@ -156,12 +165,14 @@ public sealed partial class MainWindow : Window
 
     /// <summary>
     /// 미리보기의 워터마크 박스는 워터마크 제거를 켰을 때만 보이고 그릴 수 있다 (사용자 요청) — 업스케일만 할 때 박스를 그려도 쓰이지 않아 헷갈린다.
-    /// 작업 중에도 막는다.
+    /// 작업 중에도 막는다. 결과·비교를 보는 동안에는 박스가 결과를 가리지 않게 감추고, 비교 보기에서는 끌면 세로선이 움직인다.
     /// </summary>
     private void UpdateEditorState()
     {
-        Editor.ShowBoxes = ViewModel.RemoveOn;
-        Editor.IsEditable = ViewModel.RemoveOn && !ViewModel.IsRunning;
+        bool original = !ViewModel.ShowsResult;
+        Editor.CompareMode = ViewModel.ShowsResult && ViewModel.PreviewView == PreviewMode.Compare;
+        Editor.ShowBoxes = ViewModel.RemoveOn && original;
+        Editor.IsEditable = ViewModel.RemoveOn && original && !ViewModel.IsRunning;
         Editor.Redraw();
     }
 
@@ -206,7 +217,16 @@ public sealed partial class MainWindow : Window
         RequestPreview();
     }
 
-    private void OnPreviewSourceToggled(object sender, RoutedEventArgs e) => RequestPreview();
+    /// <summary>타임라인 머리줄의 [원본 | 비교 | 결과]를 골랐을 때.</summary>
+    private void OnPreviewViewChecked(object sender, RoutedEventArgs e)
+    {
+        if (ViewModel is null) return; // 화면을 만드는 중 (IsChecked="True"가 먼저 불린다)
+        ViewModel.PreviewView = ReferenceEquals(sender, ViewCompare) ? PreviewMode.Compare
+            : ReferenceEquals(sender, ViewResult) ? PreviewMode.Result
+            : PreviewMode.Original;
+    }
+
+    private void OnScenePreviewClick(object sender, RoutedEventArgs e) => Guard(ViewModel.PreviewSceneAsync);
 
     /// <summary>타임라인의 구간 손잡이를 끌었을 때.</summary>
     private void OnTimelineRangeChanged(object? sender, EventArgs e) => ViewModel.SetRange(Timeline.RangeStart, Timeline.RangeEnd);
@@ -222,11 +242,43 @@ public sealed partial class MainWindow : Window
 
     private void OnRangeEndHereClick(object sender, RoutedEventArgs e) => ViewModel.MarkRangeEnd();
 
+    private void OnRangeTimeLostFocus(object sender, RoutedEventArgs e) => CommitRangeTime((TextBox)sender);
+
+    private void OnRangeTimeKeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
+    {
+        if (e.Key != Windows.System.VirtualKey.Enter) return;
+        CommitRangeTime((TextBox)sender);
+        e.Handled = true;
+    }
+
+    /// <summary>구간 칸에 적은 시각(분:초)을 넣는다. 읽을 수 없는 글자나 영상 밖의 시각은 실제 값으로 되돌려 보여 준다.</summary>
+    private void CommitRangeTime(TextBox box)
+    {
+        bool start = ReferenceEquals(box, RangeStartBox);
+        if (start) ViewModel.EnterRangeStart(box.Text);
+        else ViewModel.EnterRangeEnd(box.Text);
+        box.Text = start ? ViewModel.RangeStartText : ViewModel.RangeEndText;
+        box.SelectionStart = box.Text.Length;
+    }
+
     private void RequestPreview()
     {
         if (!ViewModel.HasVideo) return;
         _previewTimer.Stop();
         _previewTimer.Start();
+    }
+
+    private static async Task<BitmapImage> ToBitmapAsync(byte[] png)
+    {
+        using var stream = new InMemoryRandomAccessStream();
+        using (var writer = new DataWriter(stream.GetOutputStreamAt(0)))
+        {
+            writer.WriteBytes(png);
+            await writer.StoreAsync();
+        }
+        var bitmap = new BitmapImage();
+        await bitmap.SetSourceAsync(stream);
+        return bitmap;
     }
 
     private async Task LoadPreviewAsync()
@@ -236,18 +288,25 @@ public sealed partial class MainWindow : Window
         PreviewBusy.IsActive = true;
         try
         {
-            byte[]? png = await ViewModel.GetPreviewAsync(ViewModel.PreviewSeconds, cancel.Token);
-            if (cancel.IsCancellationRequested || png is null || png.Length == 0) return;
-
-            using var stream = new InMemoryRandomAccessStream();
-            using (var writer = new DataWriter(stream.GetOutputStreamAt(0)))
+            // 비교 보기면 왼쪽(원본)과 오른쪽(결과)을 둘 다 뽑는다. 결과 보기면 결과만, 그 밖에는 원본만.
+            bool compare = Editor.CompareMode;
+            // 시각은 한 번만 읽는다 — 첫 그림을 뽑는 사이에 재생 헤드가 움직이면 양쪽이 서로 다른 장면이 된다.
+            double seconds = ViewModel.PreviewSeconds;
+            byte[]? png = await ViewModel.GetPreviewAsync(seconds, ViewModel.ShowsResult && !compare, cancel.Token);
+            byte[]? after = compare ? await ViewModel.GetPreviewAsync(seconds, true, cancel.Token) : null;
+            if (cancel.IsCancellationRequested) return;
+            if (png is null || png.Length == 0)
             {
-                writer.WriteBytes(png);
-                await writer.StoreAsync();
+                // 결과에서 그 장면을 못 뽑았으면 비운다 — 앞에 보던 그림(원본일 수도 있다)이 결과처럼 남으면 안 된다.
+                if (ViewModel.ShowsResult && !compare) Editor.SetImage(null);
+                return;
             }
-            var bitmap = new BitmapImage();
-            await bitmap.SetSourceAsync(stream);
-            if (!cancel.IsCancellationRequested) Editor.SetImage(bitmap);
+
+            var bitmap = await ToBitmapAsync(png);
+            var afterBitmap = after is { Length: > 0 } ? await ToBitmapAsync(after) : null;
+            if (cancel.IsCancellationRequested) return;
+            Editor.SetImage(bitmap);
+            Editor.SetCompareImage(afterBitmap);
         }
         catch (OperationCanceledException)
         {
@@ -299,7 +358,49 @@ public sealed partial class MainWindow : Window
 
     private void OnRemoveBoxClick(object sender, RoutedEventArgs e)
     {
-        if ((sender as FrameworkElement)?.DataContext is BoxViewModel box) ViewModel.Boxes.Remove(box);
+        if ((sender as FrameworkElement)?.Tag is BoxViewModel box) ViewModel.Boxes.Remove(box);
+    }
+
+    /// <summary>
+    /// 숫자 칸은 적은 값을 포커스를 잃은 뒤에야 반영한다 (LostFocus는 늦게 온다). 값을 적다가 타임라인을 누르면 장면이 먼저 옮겨져서,
+    /// 움직이는 박스는 적던 값이 옮겨 간 장면의 자리로 적힌다 — 포커스가 떠나기 직전(이쪽은 바로 온다)에 반영해 둔다.
+    /// </summary>
+    private void OnBoxNumberLosingFocus(UIElement sender, Microsoft.UI.Xaml.Input.LosingFocusEventArgs e)
+    {
+        if (sender is not NumberBox box || FindInput(box) is not { } input) return;
+        string text = input.Text.Trim();
+        // 비운 칸은 숫자 칸이 하던 대로 둔다.
+        if (text.Length == 0 || box.NumberFormatter is not Windows.Globalization.NumberFormatting.INumberParser parser) return;
+        if (parser.ParseDouble(text) is { } value && value != box.Value) box.Value = value;
+    }
+
+    private static TextBox? FindInput(DependencyObject parent)
+    {
+        for (int i = 0; i < Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChildrenCount(parent); i++)
+        {
+            var child = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChild(parent, i);
+            if (child is TextBox input) return input;
+            if (FindInput(child) is { } found) return found;
+        }
+        return null;
+    }
+
+    private void OnPreviousKeyClick(object sender, RoutedEventArgs e) => GoToKey(sender, -1);
+
+    private void OnNextKeyClick(object sender, RoutedEventArgs e) => GoToKey(sender, +1);
+
+    /// <summary>움직이는 박스에서, 앞·뒤에 맞춰 둔 자리가 있는 장면으로 간다.</summary>
+    private void GoToKey(object sender, int direction)
+    {
+        if ((sender as FrameworkElement)?.Tag is not BoxViewModel box || ViewModel.KeySeconds(box, direction) is not { } seconds) return;
+        ViewModel.SeekPreview(seconds);
+        Timeline.Position = ViewModel.PreviewSeconds;
+        RequestPreview();
+    }
+
+    private void OnRemoveKeyClick(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.Tag is BoxViewModel box) box.RemoveKeyHere();
     }
 
     // ───────── 실행 ─────────
@@ -311,7 +412,8 @@ public sealed partial class MainWindow : Window
     /// <summary>결과 파일이 있으면 탐색기에서 그 파일을 선택한 채로, 없으면 출력 폴더를 연다.</summary>
     private void OnOpenFolderClick(object sender, RoutedEventArgs e)
     {
-        if (ViewModel.ResultPath is { } result && File.Exists(result))
+        // 빠른 미리보기의 결과는 임시 파일이다 — 그 대신 출력 폴더를 연다
+        if (ViewModel.ResultPath is { } result && File.Exists(result) && !ViewModel.ResultIsPreview)
         {
             OpenExplorer("/select," + result);
             return;

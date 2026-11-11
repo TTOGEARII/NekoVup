@@ -120,4 +120,14 @@ public static class DelogoPlanner
             throw new ArgumentException("프레임 안에 들어오는 워터마크 박스가 없습니다.");
         return result;
     }
+
+    /// <summary>움직이는 박스까지 다루는 꼴: 어느 프레임에서도 같은 기준 안에 들어오게 한다 (<see cref="BoxPath.ClampTo"/>).</summary>
+    public static IReadOnlyList<BoxPath> Plan(IReadOnlyList<BoxPath> paths, int frameWidth, int frameHeight)
+    {
+        var inner = new PixelRect(1, 1, frameWidth - 2, frameHeight - 2);
+        var result = paths.Select(p => p.ClampTo(inner)).OfType<BoxPath>().ToList();
+        if (result.Count == 0)
+            throw new ArgumentException("프레임 안에 들어오는 워터마크 박스가 없습니다.");
+        return result;
+    }
 }

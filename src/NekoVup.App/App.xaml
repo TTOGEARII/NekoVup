@@ -129,12 +129,12 @@
                 <Setter Property="FontSize" Value="13.5" />
                 <Setter Property="MinWidth" Value="0" />
                 <Setter Property="MinHeight" Value="0" />
-                <Setter Property="Padding" Value="0" />
+                <Setter Property="Padding" Value="14,8,14,0" />
                 <Setter Property="UseSystemFocusVisuals" Value="True" />
                 <Setter Property="Template">
                     <Setter.Value>
                         <ControlTemplate TargetType="RadioButton">
-                            <Grid x:Name="Tab" Background="Transparent" Padding="14,8,14,0" Margin="0,0,4,0">
+                            <Grid x:Name="Tab" Background="Transparent" Padding="{TemplateBinding Padding}" Margin="0,0,4,0">
                                 <Grid.RowDefinitions>
                                     <RowDefinition Height="Auto" />
                                     <RowDefinition Height="Auto" />

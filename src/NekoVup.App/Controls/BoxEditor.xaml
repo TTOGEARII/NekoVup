@@ -10,6 +10,11 @@
         <Grid x:Name="Stage" HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed">
             <Grid x:Name="Host" Background="Black">
                 <Image x:Name="Picture" Stretch="Fill" />
+                <!-- 비교 보기: 결과를 겹쳐 놓고 세로선 오른쪽만 보이게 자른다 (왼쪽 = 원본, 오른쪽 = 결과) -->
+                <!-- 검은 바탕을 깐다: 결과 그림을 못 뽑았을 때 그 자리에 원본이 비쳐 결과처럼 보이면 안 된다 -->
+                <Grid x:Name="AfterLayer" Background="Black" Visibility="Collapsed">
+                    <Image x:Name="AfterPicture" Stretch="Fill" />
+                </Grid>
                 <!-- 배경이 투명이라도 색이 지정돼 있어야 빈 곳에서 포인터 이벤트를 받는다 -->
                 <Canvas x:Name="Overlay" Background="Transparent"
                         PointerPressed="OnPointerPressed"

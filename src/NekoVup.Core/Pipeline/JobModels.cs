@@ -127,6 +127,22 @@ public sealed record JobRequest
     /// <summary>워터마크 박스 (화면에 보이는 영상 기준 픽셀 좌표).</summary>
     public required IReadOnlyList<PixelRect> Boxes { get; init; }
 
+    /// <summary>움직이는 워터마크 박스 (시각마다의 자리). <see cref="Boxes"/>와 함께 쓸 수 있다.</summary>
+    public IReadOnlyList<BoxTrack> Tracks { get; init; } = [];
+
+    /// <summary>고정 박스와 움직이는 박스를 한데 모아 프레임 번호 기준 경로로 바꾼다. 자리가 하나도 없는 움직이는 박스는 뺀다.</summary>
+    public IReadOnlyList<BoxPath> Paths(double fps)
+    {
+        var paths = new List<BoxPath>(Boxes.Count + Tracks.Count);
+        paths.AddRange(Boxes.Select(BoxPath.Fixed));
+        foreach (var track in Tracks)
+        {
+            try { paths.Add(BoxPath.From(track, fps)); }
+            catch (ArgumentException) { }
+        }
+        return paths;
+    }
+
     public JobOptions Options { get; init; } = new();
 
     /// <summary>중간 파일 폴더. 없으면 출력 폴더 아래 .nekovup에 만든다.</summary>
@@ -212,6 +228,7 @@ public sealed class JobManifest
         text.Append(CultureInfo.InvariantCulture, $"|{o.Region.Pad}|{o.Region.MaxArea}|{o.Region.MaskGrow}");
         text.Append(CultureInfo.InvariantCulture, $"|{o.ChunkLength}|{o.Overlap}|{o.SubvideoLength}|{o.MaskDilation}|{o.Fp16}");
         foreach (var box in request.Boxes) text.Append('|').Append(box.ToString());
+        foreach (var track in request.Tracks) text.Append('|').Append(track.ToString());
         return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(text.ToString())));
     }
 }

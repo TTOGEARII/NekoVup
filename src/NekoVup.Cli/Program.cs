@@ -94,6 +94,11 @@ internal static class Program
         cl.EnsureAllUsed();
         var info = await new JobRunner(settings, new ToolRunner(), NullJobLog.Instance).ProbeAsync(request.InputPath, ct);
         var o = request.Options;
+        // 화면 밖이라 빠지는 박스는 run과 같이 알린다 (영역이 왜 그렇게 잡혔는지 알 수 있게). delogo로 지울 때도 알린다.
+        JobRunner.DescribeBoxes(request, info, new DelegateJobLog((level, message) =>
+        {
+            if (level >= LogLevel.Warning) Console.Error.WriteLine("경고: " + message);
+        }));
         if (o.Mode != CleanMode.ProPainter)
         {
             // 영역 계획은 ProPainter에만 있다 — 박스 없이 업스케일만 고르면 박스가 없다는 엉뚱한 오류가 났다.
@@ -102,15 +107,16 @@ internal static class Program
         }
         JobRunner.ValidateProPainterOptions(o);
 
-        IReadOnlyList<ProcessRegion> regions;
+        MotionPlan plan;
         try
         {
-            regions = RegionPlanner.Plan(request.Boxes, info.Width, info.Height, o.Region);
+            plan = MotionPlan.Create(request.Paths(info.Fps.Value), info.Width, info.Height, o.Region);
         }
         catch (ArgumentException ex)
         {
             throw new JobException(ex.Message, ex);
         }
+        var regions = plan.Regions;
 
         long frames = info.EstimateFrames(o.StartSeconds, o.DurationSeconds);
         var chunks = ChunkPlanner.Plan((int)frames, o.ChunkLength, o.Overlap);
@@ -121,8 +127,10 @@ internal static class Program
             string resize = r.NeedsResize
                 ? string.Create(CultureInfo.InvariantCulture, $" → 상한 {o.Region.MaxArea:N0}px 초과, {r.ResizeRatio:0.####}배로 줄여 처리")
                 : "";
+            // 움직이는 박스는 지나가는 자리마다 하나씩 들어 있어서 그린 박스 수와 다르다.
+            string boxes = plan.Moves(i) ? $"워터마크가 움직이는 영역, 지나가는 자리 {r.Boxes.Count}곳" : $"박스 {r.Boxes.Count}개";
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-                $"영역 {i + 1}: x={r.Rect.X} y={r.Rect.Y} {r.Rect.Width}x{r.Rect.Height} (면적 {r.Rect.Area:N0}px, 박스 {r.Boxes.Count}개){resize}"));
+                $"영역 {i + 1}: x={r.Rect.X} y={r.Rect.Y} {r.Rect.Width}x{r.Rect.Height} (면적 {r.Rect.Area:N0}px, {boxes}){resize}"));
         }
         Console.WriteLine($"조각 {chunks.Count}개: " + string.Join(" ", chunks.Take(8).Select(c => $"[{c.Start},{c.End})")) + (chunks.Count > 8 ? " …" : ""));
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
@@ -281,6 +289,17 @@ internal static class Program
                 throw new UsageException($"--box 형식은 x,y,w,h 입니다: '{text}'");
             boxes.Add(box);
         }
+        var tracks = new List<BoxTrack>();
+        foreach (string name in (string[])["--move", "--jump"])
+        {
+            foreach (var text in cl.Values(name))
+            {
+                if (!BoxTrack.TryParse(text, name == "--jump", out var track))
+                    throw new UsageException($"{name} 형식은 \"시각=x,y,w,h;시각=x,y,w,h\" 입니다 (시각은 분:초나 초): '{text}'");
+                tracks.Add(track);
+            }
+        }
+        bool noPositions = boxes.Count == 0 && tracks.Count == 0;
 
         var upscale = (cl.Value("--upscale") ?? "none").ToLowerInvariant() switch
         {
@@ -299,7 +318,7 @@ internal static class Program
             var other => throw new UsageException($"--deinterlace 는 auto, on, off 중 하나입니다: '{other}'"),
         };
         // 박스 없이 업스케일만 고르면 워터마크 제거는 하지 않는다.
-        string modeText = cl.Value("--mode") ?? (boxes.Count == 0 && upscale != UpscalePreset.None ? "none" : "propainter");
+        string modeText = cl.Value("--mode") ?? (noPositions && upscale != UpscalePreset.None ? "none" : "propainter");
         var mode = modeText.ToLowerInvariant() switch
         {
             "propainter" => CleanMode.ProPainter,
@@ -307,19 +326,19 @@ internal static class Program
             "none" => CleanMode.None,
             var other => throw new UsageException($"--mode 는 propainter, delogo, none 중 하나입니다: '{other}'"),
         };
-        if (boxes.Count == 0 && mode != CleanMode.None)
-            throw new UsageException("워터마크 위치를 --box x,y,w,h 로 하나 이상 지정하세요. (업스케일만 하려면 --upscale 만 적으세요)");
+        if (noPositions && mode != CleanMode.None)
+            throw new UsageException("워터마크 위치를 --box x,y,w,h 로 하나 이상 지정하세요 (움직이는 워터마크는 --move, --jump). 업스케일만 하려면 --upscale 만 적으세요.");
 
         var defaults = new JobOptions();
         // 둘 다 읽어 둔다 (하나만 읽으면 같이 적었을 때 다른 하나가 "알 수 없는 옵션"으로 걸린다). 길이 0은 "전체"로 처리되므로 받지 않는다.
-        double? duration = cl.Double("--duration", positive: true), testSeconds = cl.Double("--test-seconds", positive: true);
+        double? duration = cl.Time("--duration", positive: true), testSeconds = cl.Time("--test-seconds", positive: true);
         var options = new JobOptions
         {
             Mode = mode,
             Upscale = upscale,
             Scale = cl.Int("--scale") ?? defaults.Scale,
             GpuIndex = cl.Int("--gpu") ?? defaults.GpuIndex,
-            StartSeconds = cl.Double("--start"),
+            StartSeconds = cl.Time("--start"),
             DurationSeconds = duration ?? testSeconds,
             Region = new RegionOptions
             {
@@ -341,6 +360,7 @@ internal static class Program
             InputPath = input,
             OutputPath = output ?? Path.ChangeExtension(input, ".out.mp4"),
             Boxes = boxes,
+            Tracks = tracks,
             Options = options,
             WorkDirectory = cl.Value("--work"),
             KeepWorkDirectory = cl.Flag("--keep-work"),
@@ -362,6 +382,9 @@ internal static class Program
 
         run 옵션:
           --box x,y,w,h        워터마크 위치 (여러 번 지정 가능, 화면에 보이는 영상 기준 픽셀)
+          --move "시각=x,y,w,h;시각=x,y,w,h;…"   움직이는 워터마크 — 적어 둔 시각 사이를 고르게 이어 간다
+          --jump "시각=x,y,w,h;시각=x,y,w,h;…"   움직이는 워터마크 — 다음 시각까지 그 자리에 머물다 한 번에 옮겨 간다
+                               시각은 분:초(1:23.5)나 초(83.5), 영상 처음부터 잰다. 여러 번 지정 가능
           --mode propainter|delogo|none   워터마크 제거 방식 (기본 propainter, delogo는 빠른 모드, none은 제거 안 함)
           --upscale none|anime|anime-hq|real|old   업스케일 방식 (기본 none)
                                anime: 애니메이션·빠름, anime-hq: 애니메이션·고품질, real: 실사,
@@ -371,7 +394,7 @@ internal static class Program
           --sharpen N          업스케일 뒤 선명도 0~100 (기본 0 = 안 함, 30~50 권장)
           --deinterlace auto|on|off   인터레이스(빗살) 해제 (기본 auto = 파일 표기를 따름)
           --test-seconds N     앞 N초만 처리 (= --duration N)
-          --start S --duration D     S초부터 D초 동안만 처리
+          --start S --duration D     S부터 D 동안만 처리 (초 90 이나 분:초 1:30)
           --pad N              박스 둘레 여백 (기본 96)
           --max-area N         처리 영역 면적 상한 (기본 300000)
           --chunk N --overlap N --subvideo N   조각 길이 100 / 겹침 10 / ProPainter subvideo 40
@@ -469,6 +492,12 @@ internal sealed class CommandLine
         Value(name) is not { } text ? null
         : double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out double v) && double.IsFinite(v) && (positive ? v > 0 : v >= 0) ? v
         : throw new UsageException($"{name} 에는 {(positive ? "0보다 큰" : "0 이상의")} 숫자를 적으세요: '{text}'");
+
+    /// <summary>시각이나 길이. 초("90")나 분:초("1:30")로 적는다. <paramref name="positive"/>면 0도 받지 않는다.</summary>
+    public double? Time(string name, bool positive = false) =>
+        Value(name) is not { } text ? null
+        : TimeText.TryParse(text, out double v) && (!positive || v > 0) ? v
+        : throw new UsageException($"{name} 에는 {(positive ? "0보다 긴 " : "")}시간을 초(90)나 분:초(1:30)로 적으세요: '{text}'");
 
     /// <summary>해석되지 않은 옵션이 남아 있으면 오타일 가능성이 높으므로 알려 준다.</summary>
     public void EnsureAllUsed()

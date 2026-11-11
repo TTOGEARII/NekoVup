@@ -82,6 +82,9 @@ public sealed partial class TimelineStrip : UserControl
         }
     }
 
+    /// <summary>프레임 하나의 길이(초). 쉼표·마침표 키로 한 프레임씩 옮길 때 쓴다 (0이면 모른다).</summary>
+    public double FrameSeconds { get; set; }
+
     /// <summary>처리할 구간의 시작(초). 시작과 끝이 같으면(둘 다 0) 영상 전체.</summary>
     public double RangeStart
     {
@@ -360,6 +363,8 @@ public sealed partial class TimelineStrip : UserControl
         {
             case VirtualKey.Left: Seek(_position - 1); break;
             case VirtualKey.Right: Seek(_position + 1); break;
+            case KeyComma: StepFrame(-1); break;
+            case KeyPeriod: StepFrame(+1); break;
             case VirtualKey.Home: Seek(0); break;
             case VirtualKey.End: Seek(_duration); break;
             case VirtualKey.I: RangeMarkRequested?.Invoke(this, true); break;
@@ -367,5 +372,16 @@ public sealed partial class TimelineStrip : UserControl
             default: return;
         }
         e.Handled = true;
+    }
+
+    // 쉼표(,)·마침표(.) 키 — VirtualKey에 이름이 없다.
+    private const VirtualKey KeyComma = (VirtualKey)188, KeyPeriod = (VirtualKey)190;
+
+    /// <summary>한 프레임 앞·뒤로. 프레임 사이에 서 있었으면 지금 보이는 프레임에서 센다.</summary>
+    private void StepFrame(int direction)
+    {
+        if (!(FrameSeconds > 0)) return;
+        double frame = Math.Ceiling(_position / FrameSeconds - 1e-6);
+        Seek((frame + direction) * FrameSeconds);
     }
 }

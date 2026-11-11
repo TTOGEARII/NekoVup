@@ -415,6 +415,38 @@ public class ChunkMergerTests : IDisposable
     }
 
     [Fact]
+    public void Per_Frame_Alpha_Follows_The_Frame_And_Leaves_The_Rest_Transparent()
+    {
+        const int w = 16, h = 8;
+        string root = Path.Combine(_dir, "pp"), output = Path.Combine(_dir, "out");
+        var chunks = ChunkPlanner.Plan(50, chunkLength: 30, overlap: 10); // [0,30) [20,50)
+        WriteChunk(root, chunks[0], w, h, _ => 100);   // 뒤 조각은 워터마크가 지나가지 않아 복원하지 않았다
+
+        var left = new byte[w * h];
+        ImageOps.FillRect(left, w, h, new PixelRect(1, 2, 3, 3), 255);
+        var right = new byte[w * h];
+        ImageOps.FillRect(right, w, h, new PixelRect(11, 2, 3, 3), 255);
+
+        int reported = 0;
+        ChunkMerger.Merge(root, chunks, output, w, h, frame => frame < 10 ? left : frame < 20 ? right : null,
+            new Counter(() => Interlocked.Increment(ref reported)), CancellationToken.None);
+
+        Assert.Equal(50, Directory.GetFiles(output, "*.png").Length);
+        Assert.Equal(50, reported);
+
+        byte[] Frame(int frame) => ReadRgba(Path.Combine(output, ChunkMerger.SequenceFrameName(frame)), w, h);
+        const int leftPixel = (3 * w + 2) * 4, rightPixel = (3 * w + 12) * 4;
+        Assert.Equal(255, Frame(9)[leftPixel + 3]);
+        Assert.Equal(100, Frame(9)[leftPixel]);
+        Assert.Equal(0, Frame(9)[rightPixel + 3]);
+        Assert.Equal(0, Frame(10)[leftPixel + 3]);
+        Assert.Equal(255, Frame(10)[rightPixel + 3]);
+        Assert.Equal(100, Frame(19)[rightPixel]);
+        foreach (int frame in new[] { 20, 29, 30, 49 })
+            Assert.All(Frame(frame), v => Assert.Equal(0, v));
+    }
+
+    [Fact]
     public void Upscales_Shrunken_Chunk_Frames_To_Region_Size()
     {
         const int w = 32, h = 16;

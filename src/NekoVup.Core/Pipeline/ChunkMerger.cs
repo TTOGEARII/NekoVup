@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Globalization;
+using System.Runtime.CompilerServices;
 using System.Runtime.ExceptionServices;
 using NekoVup.Core.Chunks;
 using NekoVup.Core.Imaging;
@@ -33,13 +34,36 @@ public static class ChunkMerger
         IProgress<int>? progress, CancellationToken cancellationToken)
     {
         if (alpha.Length != regionWidth * regionHeight) throw new ArgumentException("알파 크기가 영역과 다릅니다.", nameof(alpha));
+        Merge(inpaintRoot, chunks, outputDir, regionWidth, regionHeight, _ => alpha, progress, cancellationToken);
+    }
+
+    /// <summary>
+    /// 프레임마다 알파가 다른 꼴 (움직이는 워터마크). <paramref name="alphaAt"/>이 null을 주는 프레임은 지울 것이 없는 프레임이다 —
+    /// 복원 결과를 읽지 않고(그 조각은 복원하지 않았을 수도 있다) 온통 투명한 프레임을 쓴다. 여러 스레드에서 함께 부른다.
+    /// </summary>
+    public static void Merge(
+        string inpaintRoot, IReadOnlyList<ChunkRange> chunks, string outputDir,
+        int regionWidth, int regionHeight, Func<int, byte[]?> alphaAt,
+        IProgress<int>? progress, CancellationToken cancellationToken)
+    {
         Directory.CreateDirectory(outputDir);
         int frameCount = chunks[^1].End;
 
         // 알파가 0인 곳은 색도 0으로 비워 파일을 작게 만든다. 다만 색 정보는 2×2로 묶여 섞이므로(yuv420)
         // 알파 경계 바로 바깥 2픽셀까지는 색을 남겨, 가장자리 색이 검게 물들지 않게 한다.
-        var keep = new byte[alpha.Length];
-        ImageOps.Dilate(alpha, keep, regionWidth, regionHeight, 2);
+        var keeps = new ConditionalWeakTable<byte[], byte[]>();
+        byte[] Keep(byte[] alpha) => keeps.GetValue(alpha, a =>
+        {
+            var keep = new byte[a.Length];
+            ImageOps.Dilate(a, keep, regionWidth, regionHeight, 2);
+            return keep;
+        });
+        var blank = new Lazy<byte[]>(() =>
+        {
+            using var stream = new MemoryStream();
+            PngCodec.Encode(stream, new byte[regionWidth * regionHeight * 4], regionWidth, regionHeight, 4);
+            return stream.ToArray();
+        });
 
         int done = 0;
         var gate = new Lock();
@@ -52,7 +76,18 @@ public static class ChunkMerger
                 // 완성된 파일만 최종 이름을 가지므로(임시 이름으로 쓴 뒤 바꿈) 이미 있으면 건너뛰어도 안전하다.
                 if (!File.Exists(target))
                 {
-                    MergeFrame(inpaintRoot, chunks, frame, regionWidth, regionHeight, alpha, keep, target);
+                    var alpha = alphaAt(frame);
+                    if (alpha is null)
+                    {
+                        string temp = target + ".tmp";
+                        File.WriteAllBytes(temp, blank.Value);
+                        File.Move(temp, target, overwrite: true);
+                    }
+                    else
+                    {
+                        if (alpha.Length != regionWidth * regionHeight) throw new ArgumentException("알파 크기가 영역과 다릅니다.", nameof(alphaAt));
+                        MergeFrame(inpaintRoot, chunks, frame, regionWidth, regionHeight, alpha, Keep(alpha), target);
+                    }
                 }
                 // 여러 스레드가 동시에 끝내므로, 세는 것과 알리는 것을 한데 묶어야 진행률이 뒤로 가지 않는다.
                 if (progress is not null)

@@ -60,6 +60,52 @@ public sealed class JobRunner(AppSettings configured, IToolRunner runner, IJobLo
         }
     }
 
+    /// <summary>
+    /// 화면 밖이라 처리하지 않는 박스를 알리고, 움직이는 박스는 어떻게 따라가는지 적는다. 다른 박스가 남아 있으면 작업은 그대로
+    /// 끝나므로, 빠진 것을 알려야 워터마크가 왜 남았는지 안다.
+    /// </summary>
+    public static void DescribeBoxes(JobRequest request, MediaInfo info, IJobLog log)
+    {
+        if (request.Options.Mode == CleanMode.None) return;
+        // delogo는 가장자리 1픽셀을 쓰지 못한다 (DelogoPlanner와 같은 기준).
+        var frame = request.Options.Mode == CleanMode.Delogo ? new PixelRect(1, 1, info.Width - 2, info.Height - 2) : new PixelRect(0, 0, info.Width, info.Height);
+        string screen = $"화면({info.Width}x{info.Height})";
+        foreach (var box in request.Boxes)
+            if (box.ClampTo(frame).IsEmpty)
+                log.Warning($"박스 ({box.X},{box.Y}) {box.Width}x{box.Height}는 {screen} 밖이라 처리하지 않습니다.");
+        foreach (var track in request.Tracks)
+        {
+            // 경로에 쓰는 자리만 시각 순서로 (같은 프레임에 둘을 적었으면 뒤의 것 하나 — BoxPath.From과 같다).
+            var keys = track.Keys
+                .Where(BoxPath.IsUsable)
+                .GroupBy(k => FrameGrid.FrameAt(k.Seconds, info.Fps.Value))
+                .OrderBy(g => g.Key)
+                .Select(g => g.Last())
+                .ToList();
+            if (keys.Count == 0)
+            {
+                log.Warning("움직이는 박스에 쓸 수 있는 위치가 없어 처리하지 않습니다.");
+            }
+            else if (track.Jump)
+            {
+                // 건너뛰는 박스가 화면 밖에 적어 둔 자리는 쓰지 않는다 (앞 자리에 머문다).
+                foreach (var key in keys.Where(k => k.Rect.ClampTo(frame).IsEmpty))
+                    log.Warning($"움직이는 박스의 {TimeText.Format(key.Seconds)} 위치 ({key.Rect.X},{key.Rect.Y}) {key.Rect.Width}x{key.Rect.Height}는 {screen} 밖이라 쓰지 않습니다.");
+                keys.RemoveAll(k => k.Rect.ClampTo(frame).IsEmpty);
+            }
+            else if (BoxPath.From(track, info.Fps.Value).ClampTo(frame) is null)
+            {
+                // 직선으로 가는 박스는 밖에 적어 둔 자리도 가는 방향으로 쓴다. 가는 길이 화면에 한 번도 걸치지 않을 때만 뺀다.
+                log.Warning($"움직이는 박스가 {screen}에 한 번도 걸치지 않아 처리하지 않습니다.");
+                keys.Clear();
+            }
+            if (keys.Count == 0) continue;
+            string times = string.Join(", ", keys.Take(8).Select(k => TimeText.Format(k.Seconds))) + (keys.Count > 8 ? ", …" : "");
+            string how = keys.Count == 1 ? "한 자리에 고정" : track.Jump ? "자리를 건너뛰며 옮김" : "사이를 직선으로 이어 감";
+            log.Info($"움직이는 박스: 위치 {keys.Count}곳 ({times}), {how}");
+        }
+    }
+
     public async Task<JobResult> RunAsync(JobRequest request, IProgress<JobProgress>? progress, CancellationToken cancellationToken)
     {
         var clock = Stopwatch.StartNew();
@@ -85,7 +131,7 @@ public sealed class JobRunner(AppSettings configured, IToolRunner runner, IJobLo
             throw new JobException("입력 파일 이름이 이 출력의 임시 파일 이름(.partial)과 같습니다. 출력 이름을 다르게 지정하세요.");
         if (options.Mode == CleanMode.None && !upscale)
             throw new JobException("할 일이 없습니다. 워터마크 제거 방식이나 업스케일 중 하나는 골라야 합니다.");
-        if (options.Mode != CleanMode.None && request.Boxes.Count == 0)
+        if (options.Mode != CleanMode.None && request.Boxes.Count == 0 && request.Tracks.Count == 0)
             throw new JobException("워터마크 박스를 하나 이상 지정하세요.");
         // 길이 0은 ffmpeg에 "제한 없음"으로 넘어가 영상 전체를 처리하게 된다 — 앞부분만 시험하려던 것이 몇 시간짜리 작업이 된다.
         if (options.DurationSeconds is { } length && !(double.IsFinite(length) && length > 0))
@@ -132,15 +178,7 @@ public sealed class JobRunner(AppSettings configured, IToolRunner runner, IJobLo
         // 결과는 yuv420p(색 정보를 2×2로 묶는 형식)로 인코딩하므로 홀수 크기는 담지 못한다. 몇 시간 처리한 뒤 마지막 인코딩에서 실패하기 전에 알린다.
         if (info.Width % 2 != 0 || info.Height % 2 != 0)
             throw new JobException($"가로·세로 크기가 홀수인 영상({info.Width}x{info.Height})은 처리할 수 없습니다. 먼저 짝수 크기로 바꿔 주세요.");
-        // 화면 밖에 그린 박스는 빼고 처리한다. 다른 박스가 남아 있으면 작업은 그대로 끝나므로, 빠진 것을 알려야 워터마크가 왜 남았는지 안다.
-        if (options.Mode != CleanMode.None)
-        {
-            // delogo는 가장자리 1픽셀을 쓰지 못한다 (DelogoPlanner와 같은 기준).
-            var frame = options.Mode == CleanMode.Delogo ? new PixelRect(1, 1, info.Width - 2, info.Height - 2) : new PixelRect(0, 0, info.Width, info.Height);
-            foreach (var box in request.Boxes)
-                if (box.ClampTo(frame).IsEmpty)
-                    _log.Warning($"박스 ({box.X},{box.Y}) {box.Width}x{box.Height}는 화면({info.Width}x{info.Height}) 밖이라 처리하지 않습니다.");
-        }
+        DescribeBoxes(request, info, _log);
         EnsureWritableFolder(Path.GetDirectoryName(output)!);
 
         _log.Info(string.Create(CultureInfo.InvariantCulture,
@@ -292,20 +330,20 @@ public sealed class JobRunner(AppSettings configured, IToolRunner runner, IJobLo
     private async Task<(int Frames, string? WorkDirectory)> RunInWorkDirectoryAsync(JobRequest request, MediaInfo info, UpscalePlan? plan, string partial, CancellationToken cancellationToken)
     {
         var options = request.Options;
-        IReadOnlyList<ProcessRegion> regions = [];
+        var regions = MotionPlan.None;
         if (options.Mode == CleanMode.ProPainter)
         {
             ValidateProPainter(options);
             try
             {
-                regions = RegionPlanner.Plan(request.Boxes, info.Width, info.Height, options.Region);
+                regions = MotionPlan.Create(request.Paths(info.Fps.Value), info.Width, info.Height, options.Region);
             }
             catch (ArgumentException ex)
             {
                 throw new JobException(ex.Message, ex);
             }
             // 영역은 8의 배수 크기로만 잡을 수 있어, 그런 크기가 아닌 영상에서 화면 한쪽 끝에서 끝까지 걸친 박스는 가장자리가 영역 밖에 남는다.
-            foreach (var region in regions)
+            foreach (var region in regions.Regions)
             foreach (var box in region.Boxes)
                 if (box.X < region.Rect.X || box.Y < region.Rect.Y || box.Right > region.Rect.Right || box.Bottom > region.Rect.Bottom)
                     _log.Warning($"박스 ({box.X},{box.Y}) {box.Width}x{box.Height}의 가장자리 몇 픽셀은 처리 영역({region.Rect.Width}x{region.Rect.Height}) 밖이라 복원되지 않습니다. 박스를 조금 줄이면 사라집니다.");
@@ -383,7 +421,7 @@ public sealed class JobRunner(AppSettings configured, IToolRunner runner, IJobLo
     }
 
     /// <summary>업스케일러에 넣을 중간 영상(영상만, B프레임 없음)을 만든다. 이미 완성돼 있으면 건너뛴다.</summary>
-    private async Task<int> MakeCleanedAsync(JobRequest request, MediaInfo info, IReadOnlyList<ProcessRegion> regions, string work, JobManifest manifest, string cleaned, CancellationToken cancellationToken)
+    private async Task<int> MakeCleanedAsync(JobRequest request, MediaInfo info, MotionPlan regions, string work, JobManifest manifest, string cleaned, CancellationToken cancellationToken)
     {
         var options = request.Options;
         if (manifest.Cleaned && manifest.CleanedFrames > 0 && File.Exists(cleaned))
@@ -427,10 +465,10 @@ public sealed class JobRunner(AppSettings configured, IToolRunner runner, IJobLo
     private async Task<int> RunDelogoAsync(JobRequest request, MediaInfo info, string target, EncodeOptions encode, JobStage stage, CancellationToken cancellationToken)
     {
         var options = request.Options;
-        IReadOnlyList<PixelRect> boxes;
+        IReadOnlyList<BoxPath> paths;
         try
         {
-            boxes = DelogoPlanner.Plan(request.Boxes, info.Width, info.Height);
+            paths = DelogoPlanner.Plan(request.Paths(info.Fps.Value), info.Width, info.Height);
         }
         catch (ArgumentException ex)
         {
@@ -439,14 +477,33 @@ public sealed class JobRunner(AppSettings configured, IToolRunner runner, IJobLo
 
         long total = info.EstimateFrames(options.StartSeconds, options.DurationSeconds);
         long last = 0;
-        var args = FfmpegCommands.Delogo(info, boxes, options.StartSeconds, options.DurationSeconds, encode, target, options.ShouldDeinterlace(info));
-        await RunFfmpegAsync(args, frame =>
+        var args = FfmpegCommands.Delogo(info, paths, options.StartSeconds, options.DurationSeconds, encode, target, options.ShouldDeinterlace(info));
+        // 움직이는 박스는 위치를 많이 적을수록 필터가 길어진다. 명령줄 길이 한도(약 3만 자)를 넘지 않게 길면 파일로 넘긴다.
+        string? filterFile = null;
+        int vf = args.IndexOf("-vf");
+        if (vf >= 0 && args[vf + 1].Length > MaxInlineFilter)
         {
-            last = frame;
-            _progress.Report(stage, Fraction(frame, total));
-        }, cancellationToken).ConfigureAwait(false);
+            filterFile = target + ".filter.txt";
+            File.WriteAllText(filterFile, args[vf + 1], new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+            (args[vf], args[vf + 1]) = ("-/vf", filterFile);
+        }
+        try
+        {
+            await RunFfmpegAsync(args, frame =>
+            {
+                last = frame;
+                _progress.Report(stage, Fraction(frame, total));
+            }, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            if (filterFile is not null) TryDeleteFile(filterFile);
+        }
         return (int)last;
     }
+
+    /// <summary>이보다 긴 필터는 명령줄에 적지 않고 파일로 넘긴다 (ffmpeg <c>-/vf 파일</c>).</summary>
+    private const int MaxInlineFilter = 2000;
 
     private static readonly HashSet<string> ReservedNames = new(
         ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$",
@@ -505,9 +562,10 @@ public sealed class JobRunner(AppSettings configured, IToolRunner runner, IJobLo
     }
 
     /// <summary>영역 추출 → ProPainter → 병합 → 원본 위에 합성해서 <paramref name="target"/>에 인코딩한다.</summary>
-    private async Task<int> CleanWithProPainterAsync(JobRequest request, MediaInfo info, IReadOnlyList<ProcessRegion> regions, string work, JobManifest manifest, string target, EncodeOptions encode, CancellationToken cancellationToken)
+    private async Task<int> CleanWithProPainterAsync(JobRequest request, MediaInfo info, MotionPlan motion, string work, JobManifest manifest, string target, EncodeOptions encode, CancellationToken cancellationToken)
     {
         var options = request.Options;
+        var regions = motion.Regions;
         manifest.Regions = [.. regions.Select(r => r.Rect.ToString())];
         manifest.Save(work);
         for (int i = 0; i < regions.Count; i++)
@@ -516,8 +574,13 @@ public sealed class JobRunner(AppSettings configured, IToolRunner runner, IJobLo
             string resize = r.NeedsResize
                 ? string.Create(CultureInfo.InvariantCulture, $", 면적이 커서 {r.ResizeRatio:0.####}배로 줄여 처리")
                 : "";
-            _log.Info($"처리 영역 {i + 1}: 위치 ({r.Rect.X},{r.Rect.Y}) 크기 {r.Rect.Width}x{r.Rect.Height}{resize}");
+            _log.Info($"처리 영역 {i + 1}: 위치 ({r.Rect.X},{r.Rect.Y}) 크기 {r.Rect.Width}x{r.Rect.Height}{resize}{(motion.Moves(i) ? ", 움직이는 워터마크" : "")}");
+            // 영역은 워터마크가 지나가는 자리를 모두 덮는다. 넓게 돌아다니면 영역이 커져 줄여서 처리하게 되고, 그만큼 흐려진다.
+            if (motion.Moves(i) && r.NeedsResize)
+                _log.Warning("워터마크가 넓은 범위를 움직여 처리 영역이 큽니다. 느리고 복원한 자리가 흐릿할 수 있습니다. 결과가 아쉬우면 '빠르게 (delogo)' 방식을 써 보세요.");
         }
+        // 조각 안의 프레임 번호(0부터) → 원본 기준 프레임 번호. 움직이는 박스의 자리는 원본 기준으로 적혀 있다.
+        long SourceFrame(int frame) => FrameGrid.SourceFrame(options.StartSeconds, frame, info.Fps.Value);
 
         long estimatedFrames = info.EstimateFrames(options.StartSeconds, options.DurationSeconds);
         if (!request.SkipDiskSpaceCheck && !manifest.Extracted)
@@ -541,15 +604,22 @@ public sealed class JobRunner(AppSettings configured, IToolRunner runner, IJobLo
                     continue;
                 }
 
+                int region = i, skipped = 0;
+                Func<int, IReadOnlyList<PixelRect>>? maskAt = motion.Moves(i) ? frame => motion.MaskBoxes(region, SourceFrame(frame)) : null;
                 foreach (var chunk in chunks)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     string detail = $"영역 {i + 1}/{regions.Count}, 조각 {chunk.Index + 1}/{chunks.Count}";
                     _progress.Report(JobStage.Inpaint, (double)doneChunks / totalChunks, detail);
-                    await InpaintChunkAsync(work, scratch, i, regions[i], chunk, options, cancellationToken).ConfigureAwait(false);
+                    // 이 조각 내내 워터마크가 다른 데 가 있으면 복원할 것이 없다 (병합 때 투명한 프레임을 쓴다).
+                    if (maskAt is not null && !Enumerable.Range(chunk.Start, chunk.Length).Any(frame => maskAt(frame).Count > 0))
+                        skipped++;
+                    else
+                        await InpaintChunkAsync(work, scratch, i, regions[i], chunk, maskAt, options, cancellationToken).ConfigureAwait(false);
                     doneChunks++;
                     _progress.Report(JobStage.Inpaint, (double)doneChunks / totalChunks, detail);
                 }
+                if (skipped > 0) _log.Info($"영역 {i + 1}: 워터마크가 지나가지 않는 조각 {skipped}개는 건너뛰었습니다.");
             }
         }
         finally
@@ -564,13 +634,23 @@ public sealed class JobRunner(AppSettings configured, IToolRunner runner, IJobLo
             if (IsMerged(manifest, work, i, frameCount)) continue;
             var region = regions[i];
             int index = i;
-            var alpha = MaskBuilder.BuildAlpha(region, options.MaskDilation, region.ResizeRatio);
+            Func<int, byte[]?> alphaAt;
+            if (motion.Moves(i))
+            {
+                var moving = new MovingAlpha(region.Rect.Width, region.Rect.Height, options.MaskDilation, region.ResizeRatio);
+                alphaAt = frame => moving.For(motion.MaskBoxes(index, SourceFrame(frame)));
+            }
+            else
+            {
+                var alpha = MaskBuilder.BuildAlpha(region, options.MaskDilation, region.ResizeRatio);
+                alphaAt = _ => alpha;
+            }
             var mergeProgress = new SynchronousProgress<int>(done =>
                 _progress.Report(JobStage.Merge, (index + (double)done / frameCount) / regions.Count));
             try
             {
                 await Task.Run(() => ChunkMerger.Merge(InpaintDir(work, index), chunks, OutDir(work, index),
-                    region.Rect.Width, region.Rect.Height, alpha, mergeProgress, cancellationToken), cancellationToken).ConfigureAwait(false);
+                    region.Rect.Width, region.Rect.Height, alphaAt, mergeProgress, cancellationToken), cancellationToken).ConfigureAwait(false);
             }
             catch (JobException ex)
             {
@@ -639,7 +719,8 @@ public sealed class JobRunner(AppSettings configured, IToolRunner runner, IJobLo
     /// 작업 디렉터리는 어차피 ProPainter 폴더여야 한다(가중치를 상대 경로 weights/ 에서 찾는다).
     /// </para>
     /// </summary>
-    private async Task InpaintChunkAsync(string work, string scratch, int regionIndex, ProcessRegion region, ChunkRange chunk, JobOptions options, CancellationToken cancellationToken)
+    /// <param name="maskAt">움직이는 워터마크면 프레임(구간 안 번호)마다 칠할 사각형. 고정이면 null — 마스크 한 장을 모든 프레임에 쓴다.</param>
+    private async Task InpaintChunkAsync(string work, string scratch, int regionIndex, ProcessRegion region, ChunkRange chunk, Func<int, IReadOnlyList<PixelRect>>? maskAt, JobOptions options, CancellationToken cancellationToken)
     {
         string name = ChunkMerger.ChunkName(chunk);
         string framesDir = ChunkMerger.ChunkFramesDir(InpaintDir(work, regionIndex), chunk);
@@ -652,12 +733,21 @@ public sealed class JobRunner(AppSettings configured, IToolRunner runner, IJobLo
         string regionScratch = Path.Combine(scratch, "r" + regionIndex.ToString(CultureInfo.InvariantCulture));
         string inputDir = Path.Combine(regionScratch, "in", name);
         string outputRoot = Path.Combine(regionScratch, "out");
-        string maskPath = Path.Combine(regionScratch, "mask.png");
+        // 움직이는 워터마크는 프레임마다 마스크가 달라, 프레임과 같은 이름의 마스크를 폴더에 담아 넘긴다 (ProPainter가 이름순으로 짝짓는다).
+        string maskPath = maskAt is null ? Path.Combine(regionScratch, "mask.png") : Path.Combine(regionScratch, "mask", name);
         TryDeleteDirectory(inputDir);
         TryDeleteDirectory(Path.Combine(outputRoot, name));
         Directory.CreateDirectory(inputDir);
         Directory.CreateDirectory(outputRoot);
-        PngCodec.Write(maskPath, MaskBuilder.BuildMask(region), region.Rect.Width, region.Rect.Height, 1);
+        if (maskAt is null)
+        {
+            PngCodec.Write(maskPath, MaskBuilder.BuildMask(region), region.Rect.Width, region.Rect.Height, 1);
+        }
+        else
+        {
+            TryDeleteDirectory(maskPath);
+            Directory.CreateDirectory(maskPath);
+        }
 
         // 추출해 둔 프레임을 하드링크로 모은다 (다른 드라이브면 복사).
         string src = SrcDir(work, regionIndex);
@@ -665,6 +755,8 @@ public sealed class JobRunner(AppSettings configured, IToolRunner runner, IJobLo
         {
             string file = ChunkMerger.SequenceFrameName(frame);
             FileLinker.LinkOrCopy(Path.Combine(src, file), Path.Combine(inputDir, file));
+            if (maskAt is not null)
+                PngCodec.Write(Path.Combine(maskPath, file), MaskBuilder.BuildMask(region.Rect.Width, region.Rect.Height, maskAt(frame)), region.Rect.Width, region.Rect.Height, 1);
         }
 
         string Relative(string path) => Path.GetRelativePath(settings.ProPainterDir, path);
@@ -720,6 +812,7 @@ public sealed class JobRunner(AppSettings configured, IToolRunner runner, IJobLo
 
         TryDeleteDirectory(inputDir);
         TryDeleteDirectory(Path.Combine(outputRoot, name));
+        if (maskAt is not null) TryDeleteDirectory(maskPath);
         _log.Info(string.Create(CultureInfo.InvariantCulture, $"영역 {regionIndex + 1} 조각 {name}: {chunk.Length}장 복원 ({clock.Elapsed.TotalSeconds:0.0}초)"));
     }
 

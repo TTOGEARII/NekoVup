@@ -201,13 +201,24 @@
                                     </Grid.ColumnDefinitions>
                                     <TextBlock Style="{StaticResource PanelTitle}" Text="타임라인" />
                                     <TextBlock Grid.Column="1" Style="{StaticResource Timecode}" Text="{x:Bind ViewModel.PreviewTimeText, Mode=OneWay}" />
-                                    <StackPanel Grid.Column="3" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center"
-                                                Visibility="{x:Bind ViewModel.HasResult, Mode=OneWay}">
-                                        <TextBlock Text="원본" FontSize="12" VerticalAlignment="Center" Foreground="{ThemeResource NekoHint}" />
-                                        <ToggleSwitch OnContent="" OffContent="" MinWidth="0" MinHeight="0" Margin="0,-6,-8,-6"
-                                                      AutomationProperties.Name="결과 보기"
-                                                      IsOn="{x:Bind ViewModel.PreviewResult, Mode=TwoWay}" Toggled="OnPreviewSourceToggled" />
-                                        <TextBlock Text="결과" FontSize="12" VerticalAlignment="Center" Foreground="{ThemeResource NekoHint}" />
+                                    <StackPanel Grid.Column="3" Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+                                        <Button Padding="8,2" Click="OnScenePreviewClick" IsEnabled="{x:Bind ViewModel.CanStart, Mode=OneWay}"
+                                                AutomationProperties.Name="이 장면 미리보기"
+                                                ToolTipService.ToolTip="재생 헤드 둘레만 지금 설정으로 처리해 원본과 비교합니다 (delogo·업스케일은 1초, ProPainter·옛 비디오는 실제 작업과 같은 조각 단위). 출력 파일은 만들지 않습니다.">
+                                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                                <FontIcon Glyph="&#xE7B3;" FontSize="12" />
+                                                <TextBlock Text="이 장면 미리보기" FontSize="12" />
+                                            </StackPanel>
+                                        </Button>
+                                        <!-- 결과가 있을 때만: 원본 / 원본·결과 나란히 / 결과. 머리줄(30)에 밑줄까지 들어가게 여백을 줄인다 -->
+                                        <StackPanel Orientation="Horizontal" Spacing="2" Visibility="{x:Bind ViewModel.HasResult, Mode=OneWay}">
+                                            <RadioButton x:Name="ViewOriginal" Style="{StaticResource FlatTab}" GroupName="PreviewView" Content="원본" FontSize="12" Padding="10,4,10,0"
+                                                         IsChecked="True" Checked="OnPreviewViewChecked" AutomationProperties.Name="원본 보기" />
+                                            <RadioButton x:Name="ViewCompare" Style="{StaticResource FlatTab}" GroupName="PreviewView" Content="비교" FontSize="12" Padding="10,4,10,0"
+                                                         Checked="OnPreviewViewChecked" AutomationProperties.Name="비교 보기" />
+                                            <RadioButton x:Name="ViewResult" Style="{StaticResource FlatTab}" GroupName="PreviewView" Content="결과" FontSize="12" Padding="10,4,10,0"
+                                                         Checked="OnPreviewViewChecked" AutomationProperties.Name="결과 보기" />
+                                        </StackPanel>
                                     </StackPanel>
                                 </Grid>
                             </Border>
@@ -215,6 +226,7 @@
                                                     RangeChanged="OnTimelineRangeChanged" RangeMarkRequested="OnTimelineRangeMark"
                                                     Duration="{x:Bind ViewModel.DurationSeconds, Mode=OneWay}"
                                                     Position="{x:Bind ViewModel.PreviewSeconds, Mode=OneWay}"
+                                                    FrameSeconds="{x:Bind ViewModel.FrameSeconds, Mode=OneWay}"
                                                     RangeStart="{x:Bind ViewModel.TimelineRangeStart, Mode=OneWay}"
                                                     RangeEnd="{x:Bind ViewModel.TimelineRangeEnd, Mode=OneWay}"
                                                     RangeEditable="{x:Bind ViewModel.RangeEditable, Mode=OneWay}"
@@ -262,7 +274,7 @@
                                         </Grid>
                                     </Border>
                                     <TextBlock Style="{StaticResource HintText}"
-                                               Text="미리보기 위에서 끌어서 그립니다. 박스 안을 끌면 이동, 손잡이로 크기 조절, Delete로 삭제. 워터마크가 영상 내내 같은 자리에 있어야 합니다." />
+                                               Text="미리보기 위에서 끌어서 그립니다. 박스 안을 끌면 이동, 손잡이로 크기 조절, Delete로 삭제. 워터마크가 자리를 옮기면 박스 아래의 '움직이는 워터마크'를 켜고, 장면을 옮겨 가며 박스를 다시 맞추세요." />
                                     <Grid ColumnSpacing="6" Margin="0,2,0,0">
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="*" />
@@ -282,22 +294,42 @@
                                         </ItemsRepeater.Layout>
                                         <ItemsRepeater.ItemTemplate>
                                             <DataTemplate x:DataType="vm:BoxViewModel">
-                                                <Grid ColumnSpacing="6">
-                                                    <Grid.ColumnDefinitions>
-                                                        <ColumnDefinition Width="*" />
-                                                        <ColumnDefinition Width="*" />
-                                                        <ColumnDefinition Width="*" />
-                                                        <ColumnDefinition Width="*" />
-                                                        <ColumnDefinition Width="36" />
-                                                    </Grid.ColumnDefinitions>
-                                                    <NumberBox Value="{x:Bind X, Mode=TwoWay}" Minimum="0" SmallChange="1" />
-                                                    <NumberBox Grid.Column="1" Value="{x:Bind Y, Mode=TwoWay}" Minimum="0" SmallChange="1" />
-                                                    <NumberBox Grid.Column="2" Value="{x:Bind Width, Mode=TwoWay}" Minimum="1" SmallChange="1" />
-                                                    <NumberBox Grid.Column="3" Value="{x:Bind Height, Mode=TwoWay}" Minimum="1" SmallChange="1" />
-                                                    <Button Grid.Column="4" Padding="6" Click="OnRemoveBoxClick" ToolTipService.ToolTip="이 박스 삭제">
-                                                        <FontIcon Glyph="&#xE74D;" FontSize="14" />
-                                                    </Button>
-                                                </Grid>
+                                                <StackPanel Spacing="2">
+                                                    <Grid ColumnSpacing="6">
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="*" />
+                                                            <ColumnDefinition Width="*" />
+                                                            <ColumnDefinition Width="*" />
+                                                            <ColumnDefinition Width="*" />
+                                                            <ColumnDefinition Width="36" />
+                                                        </Grid.ColumnDefinitions>
+                                                        <NumberBox Value="{x:Bind X, Mode=TwoWay}" Minimum="0" SmallChange="1" LosingFocus="OnBoxNumberLosingFocus" />
+                                                        <NumberBox Grid.Column="1" Value="{x:Bind Y, Mode=TwoWay}" Minimum="0" SmallChange="1" LosingFocus="OnBoxNumberLosingFocus" />
+                                                        <NumberBox Grid.Column="2" Value="{x:Bind Width, Mode=TwoWay}" Minimum="1" SmallChange="1" LosingFocus="OnBoxNumberLosingFocus" />
+                                                        <NumberBox Grid.Column="3" Value="{x:Bind Height, Mode=TwoWay}" Minimum="1" SmallChange="1" LosingFocus="OnBoxNumberLosingFocus" />
+                                                        <!-- x:Bind를 쓰는 템플릿에는 ItemsRepeater가 DataContext를 넣어 주지 않는다 — 누른 박스는 Tag로 알린다 -->
+                                                        <Button Grid.Column="4" Padding="6" Tag="{x:Bind}" Click="OnRemoveBoxClick"
+                                                                AutomationProperties.Name="이 박스 삭제" ToolTipService.ToolTip="이 박스 삭제">
+                                                            <FontIcon Glyph="&#xE74D;" FontSize="14" />
+                                                        </Button>
+                                                    </Grid>
+                                                    <!-- 움직이는 워터마크: 장면마다 박스를 맞춰 두면 그 사이를 따라간다 -->
+                                                    <CheckBox Content="움직이는 워터마크" IsChecked="{x:Bind Moving, Mode=TwoWay}" MinWidth="0" FontSize="12"
+                                                              ToolTipService.ToolTip="워터마크가 자리를 옮기면 켜세요. 타임라인에서 장면을 옮겨 가며 박스를 워터마크에 맞추면, 맞춘 자리가 장면마다 기억됩니다." />
+                                                    <StackPanel Spacing="4" Margin="0,0,0,6" Visibility="{x:Bind Moving, Mode=OneWay}">
+                                                        <TextBlock Text="{x:Bind KeyText, Mode=OneWay}" Style="{StaticResource HintText}" />
+                                                        <StackPanel Orientation="Horizontal" Spacing="6">
+                                                            <Button Padding="8,3" FontSize="12" Content="◀ 앞 자리" Tag="{x:Bind}" Click="OnPreviousKeyClick"
+                                                                    AutomationProperties.Name="앞에 맞춰 둔 자리로" ToolTipService.ToolTip="앞에 맞춰 둔 장면으로 갑니다" />
+                                                            <Button Padding="8,3" FontSize="12" Content="뒤 자리 ▶" Tag="{x:Bind}" Click="OnNextKeyClick"
+                                                                    AutomationProperties.Name="뒤에 맞춰 둔 자리로" ToolTipService.ToolTip="뒤에 맞춰 둔 장면으로 갑니다" />
+                                                            <Button Padding="8,3" FontSize="12" Content="이 자리 지우기" Tag="{x:Bind}" Click="OnRemoveKeyClick"
+                                                                    AutomationProperties.Name="이 장면에 맞춰 둔 자리 지우기" ToolTipService.ToolTip="이 장면에 맞춰 둔 자리를 지웁니다" />
+                                                        </StackPanel>
+                                                        <CheckBox Content="한 자리에 머물다 한 번에 옮겨 감" IsChecked="{x:Bind Jump, Mode=TwoWay}" MinWidth="0" FontSize="12"
+                                                                  ToolTipService.ToolTip="끄면 맞춰 둔 자리 사이를 고르게 미끄러져 가는 것으로 봅니다. 켜면 다음에 맞춰 둔 장면까지 제자리에 있다가 그 장면에서 바로 옮겨 갑니다 — 자리가 바뀌는 첫 장면에서 박스를 맞추세요 (타임라인을 누른 뒤 쉼표·마침표 키로 한 프레임씩 옮길 수 있습니다)." />
+                                                    </StackPanel>
+                                                </StackPanel>
                                             </DataTemplate>
                                         </ItemsRepeater.ItemTemplate>
                                     </ItemsRepeater>
@@ -364,14 +396,16 @@
                                         <RowDefinition Height="Auto" />
                                         <RowDefinition Height="Auto" />
                                     </Grid.RowDefinitions>
-                                    <TextBlock Text="시작(초)" VerticalAlignment="Center" Foreground="{ThemeResource NekoText}" />
-                                    <NumberBox Grid.Column="1" Minimum="0" Maximum="{x:Bind ViewModel.DurationSeconds, Mode=OneWay}" SmallChange="0.1" LargeChange="1"
-                                               Value="{x:Bind ViewModel.RangeStart, Mode=TwoWay}" AutomationProperties.Name="구간 시작(초)" />
+                                    <TextBlock Text="시작" VerticalAlignment="Center" Foreground="{ThemeResource NekoText}" />
+                                    <TextBox x:Name="RangeStartBox" Grid.Column="1" Text="{x:Bind ViewModel.RangeStartText, Mode=OneWay}" PlaceholderText="분:초"
+                                             FontFamily="Consolas" IsSpellCheckEnabled="False" LostFocus="OnRangeTimeLostFocus" KeyDown="OnRangeTimeKeyDown"
+                                             AutomationProperties.Name="구간 시작 (분:초)" ToolTipService.ToolTip="분:초로 적습니다 (예: 1:23.5, 1:02:03). 숫자만 적으면 초입니다." />
                                     <Button Grid.Column="2" Content="현재 위치" Click="OnRangeStartHereClick"
                                             AutomationProperties.Name="구간 시작을 현재 위치로" ToolTipService.ToolTip="재생 헤드 자리를 구간의 시작으로 (I)" />
-                                    <TextBlock Grid.Row="1" Text="끝(초)" VerticalAlignment="Center" Foreground="{ThemeResource NekoText}" />
-                                    <NumberBox Grid.Row="1" Grid.Column="1" Minimum="0" Maximum="{x:Bind ViewModel.DurationSeconds, Mode=OneWay}" SmallChange="0.1" LargeChange="1"
-                                               Value="{x:Bind ViewModel.RangeEnd, Mode=TwoWay}" AutomationProperties.Name="구간 끝(초)" />
+                                    <TextBlock Grid.Row="1" Text="끝" VerticalAlignment="Center" Foreground="{ThemeResource NekoText}" />
+                                    <TextBox x:Name="RangeEndBox" Grid.Row="1" Grid.Column="1" Text="{x:Bind ViewModel.RangeEndText, Mode=OneWay}" PlaceholderText="분:초"
+                                             FontFamily="Consolas" IsSpellCheckEnabled="False" LostFocus="OnRangeTimeLostFocus" KeyDown="OnRangeTimeKeyDown"
+                                             AutomationProperties.Name="구간 끝 (분:초)" ToolTipService.ToolTip="분:초로 적습니다 (예: 1:23.5, 1:02:03). 숫자만 적으면 초입니다." />
                                     <Button Grid.Row="1" Grid.Column="2" Content="현재 위치" Click="OnRangeEndHereClick"
                                             AutomationProperties.Name="구간 끝을 현재 위치로" ToolTipService.ToolTip="재생 헤드 자리를 구간의 끝으로 (O)" />
                                 </Grid>

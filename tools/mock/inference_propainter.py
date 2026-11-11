@@ -1,7 +1,7 @@
 """ProPainter의 inference_propainter.py를 흉내 내는 가짜 스크립트 (통합 테스트 전용).
 
 GPU도 가중치도 없이, 진짜와 같은 인자를 받아 같은 폴더 구조로 결과를 낸다.
-  - 입력: 프레임 폴더(-i), 마스크 PNG(-m), 출력 루트(-o)
+  - 입력: 프레임 폴더(-i), 마스크 PNG 또는 프레임별 마스크 폴더(-m), 출력 루트(-o)
   - 출력: <출력 루트>/<입력 폴더 이름>/frames/0000.png … (--save_frames 일 때만)
           + masked_in.mp4, inpaint_out.mp4 (내용 없는 자리 표시 파일)
   - --resize_ratio 를 주면 진짜처럼 "줄어든 크기"로 프레임을 저장한다.
@@ -121,8 +121,18 @@ def main():
     process_size = (out_size[0] - out_size[0] % 8, out_size[1] - out_size[1] % 8)
     frames = [f.resize(process_size) if f.size != process_size else f for f in frames]
 
-    mask_img = Image.open(args.mask).resize(process_size, Image.NEAREST).convert('L')
-    mask = dilate_cross(np.asarray(mask_img) > 0, args.mask_dilation)
+    # 진짜와 같이: 그림 파일 하나면 모든 프레임에 같은 마스크, 폴더면 이름순으로 프레임마다 하나씩
+    if args.mask.endswith(('jpg', 'jpeg', 'png', 'JPG', 'JPEG', 'PNG')):
+        mask_files = [args.mask]
+    else:
+        mask_files = [os.path.join(args.mask, f) for f in sorted(os.listdir(args.mask))]
+    masks = [dilate_cross(np.asarray(Image.open(f).resize(process_size, Image.NEAREST).convert('L')) > 0, args.mask_dilation)
+             for f in mask_files]
+    if len(masks) == 1:
+        masks = masks * len(frames)
+    if len(masks) != len(frames):
+        print(f'마스크 수({len(masks)})가 프레임 수({len(frames)})와 다릅니다.', file=sys.stderr)
+        return 2
 
     save_root = os.path.join(args.output, name)
     os.makedirs(os.path.join(save_root, 'frames'), exist_ok=True)
@@ -132,7 +142,7 @@ def main():
         if delay:
             time.sleep(delay)
         pixels = np.asarray(frame)
-        result = pixels if mode == 'identity' else fill(pixels, mask)
+        result = pixels if mode == 'identity' or not masks[idx].any() else fill(pixels, masks[idx])
         if args.save_frames:
             image = Image.fromarray(result)
             if image.size != out_size:

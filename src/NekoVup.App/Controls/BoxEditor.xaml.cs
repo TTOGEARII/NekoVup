@@ -40,6 +40,88 @@ public sealed partial class BoxEditor : UserControl
     /// <summary>박스와 처리 영역을 그릴지. 워터마크 제거를 끄면 감춘다 (박스 값은 남아 있어 다시 켜면 그대로 보인다).</summary>
     public bool ShowBoxes { get; set; } = true;
 
+    private bool _compareMode;
+    private double _divider = 0.5;     // 비교 보기의 세로선 위치 (화면 너비에 대한 비율)
+    private bool _draggingDivider;
+
+    /// <summary>
+    /// 원본·결과 나란히 보기: 세로선 왼쪽은 원본(<see cref="SetImage"/>), 오른쪽은 결과(<see cref="SetCompareImage"/>).
+    /// 이때는 박스를 그리지 않고, 어디를 끌든 세로선이 따라온다.
+    /// </summary>
+    public bool CompareMode
+    {
+        get => _compareMode;
+        set
+        {
+            if (value == _compareMode) return;
+            _compareMode = value;
+            _draggingDivider = false;
+            // 결과 그림이 올 때까지는 덮지 않는다 (앞 결과의 그림이 남아 있으면 그것이 잠깐 보인다).
+            AfterPicture.Source = null;
+            AfterLayer.Visibility = Visibility.Collapsed;
+            UpdateCompareClip();
+            Redraw();
+        }
+    }
+
+    /// <summary>비교 보기의 오른쪽 그림. null이면 (결과에서 그 장면을 못 뽑았으면) 검게 둔다 — 원본이 결과처럼 보이면 안 된다.</summary>
+    public void SetCompareImage(ImageSource? image)
+    {
+        AfterPicture.Source = image;
+        AfterLayer.Visibility = _compareMode ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    /// <summary>결과 그림을 세로선 오른쪽만 보이게 자른다.</summary>
+    private void UpdateCompareClip()
+    {
+        if (double.IsNaN(Host.Width) || double.IsNaN(Host.Height)) return;
+        double x = Host.Width * _divider;
+        AfterLayer.Clip = new RectangleGeometry { Rect = new Rect(x, 0, Math.Max(0, Host.Width - x), Host.Height) };
+    }
+
+    private void MoveDivider(double x)
+    {
+        if (double.IsNaN(Host.Width) || Host.Width <= 0) return;
+        _divider = Math.Clamp(x / Host.Width, 0, 1);
+        UpdateCompareClip();
+        Redraw();
+    }
+
+    /// <summary>비교 보기의 세로선과 손잡이, 양쪽 이름표.</summary>
+    private void DrawDivider()
+    {
+        double x = Math.Round(Host.Width * _divider);
+        var line = new Rectangle { Width = 2, Height = Host.Height, Fill = new SolidColorBrush(Colors.White), IsHitTestVisible = false };
+        Canvas.SetLeft(line, x - 1);
+        Overlay.Children.Add(line);
+        var grip = new Rectangle
+        {
+            Width = 12, Height = 36, RadiusX = 4, RadiusY = 4,
+            Fill = new SolidColorBrush(Colors.White), Stroke = new SolidColorBrush(Colors.Black), StrokeThickness = 1, IsHitTestVisible = false,
+        };
+        Canvas.SetLeft(grip, x - 6);
+        Canvas.SetTop(grip, Host.Height / 2 - 18);
+        Overlay.Children.Add(grip);
+        AddLabel("원본", 8, alignRight: false);
+        AddLabel("결과", Host.Width - 8, alignRight: true);
+    }
+
+    private void AddLabel(string text, double x, bool alignRight)
+    {
+        var label = new Border
+        {
+            Background = new SolidColorBrush(ColorHelper.FromArgb(160, 0, 0, 0)),
+            Padding = new Thickness(6, 2, 6, 2),
+            CornerRadius = new CornerRadius(3),
+            IsHitTestVisible = false,
+            Child = new TextBlock { Text = text, FontSize = 12, Foreground = new SolidColorBrush(Colors.White) },
+        };
+        label.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+        Canvas.SetLeft(label, alignRight ? x - label.DesiredSize.Width : x);
+        Canvas.SetTop(label, 8);
+        Overlay.Children.Add(label);
+    }
+
     public void Attach(MainViewModel viewModel)
     {
         _viewModel = viewModel;
@@ -52,6 +134,7 @@ public sealed partial class BoxEditor : UserControl
         (_videoWidth, _videoHeight) = (width, height);
         _aspect = displayAspect > 0 ? displayAspect : (double)width / height;
         _selected = null;
+        CancelDrag();
         Stage.Visibility = Visibility.Visible;
         ArrangeHost();
     }
@@ -72,6 +155,7 @@ public sealed partial class BoxEditor : UserControl
         double height = width / _aspect;
         Host.Width = Overlay.Width = width;
         Host.Height = Overlay.Height = height;
+        UpdateCompareClip();
         Redraw();
     }
 
@@ -86,8 +170,18 @@ public sealed partial class BoxEditor : UserControl
     public void Redraw()
     {
         Overlay.Children.Clear();
-        if (_viewModel is null || _videoWidth == 0 || double.IsNaN(Host.Width) || !ShowBoxes) return;
-        if (_selected is not null && !_viewModel.Boxes.Contains(_selected)) _selected = null;
+        if (_viewModel is null || _videoWidth == 0 || double.IsNaN(Host.Width)) return;
+        if (_compareMode)
+        {
+            DrawDivider();
+            return;
+        }
+        if (!ShowBoxes) return;
+        if (_selected is not null && !_viewModel.Boxes.Contains(_selected))
+        {
+            _selected = null;
+            CancelDrag();
+        }
 
         // 처리 영역: 노란 점선
         foreach (var region in _viewModel.RegionRects)
@@ -158,9 +252,18 @@ public sealed partial class BoxEditor : UserControl
 
     private void OnPointerPressed(object sender, PointerRoutedEventArgs e)
     {
-        if (_viewModel is null || !IsEditable || _videoWidth == 0) return;
+        if (_viewModel is null || _videoWidth == 0) return;
         var point = e.GetCurrentPoint(Overlay);
         if (!point.Properties.IsLeftButtonPressed) return;
+        if (_compareMode)
+        {
+            // 비교 보기: 누른 곳으로 세로선을 옮기고 끄는 대로 따라오게 한다
+            _draggingDivider = Overlay.CapturePointer(e.Pointer);
+            MoveDivider(point.Position.X);
+            e.Handled = true;
+            return;
+        }
+        if (!IsEditable) return;
 
         Focus(FocusState.Pointer);
         var (grip, box) = HitTest(point.Position);
@@ -178,6 +281,12 @@ public sealed partial class BoxEditor : UserControl
     {
         if (_viewModel is null || _videoWidth == 0) return;
         var screen = e.GetCurrentPoint(Overlay).Position;
+        if (_compareMode)
+        {
+            ProtectedCursor = InputSystemCursor.Create(InputSystemCursorShape.SizeWestEast);
+            if (_draggingDivider) MoveDivider(screen.X);
+            return;
+        }
 
         if (_grip == BoxGrip.None)
         {
@@ -206,10 +315,25 @@ public sealed partial class BoxEditor : UserControl
 
     private void OnPointerReleased(object sender, PointerRoutedEventArgs e)
     {
+        if (_draggingDivider)
+        {
+            // 캡처를 풀면 PointerCaptureLost로 다시 불린다 — 먼저 끝난 것으로 표시한다
+            _draggingDivider = false;
+            Overlay.ReleasePointerCaptures();
+            return;
+        }
         if (_grip == BoxGrip.None) return;
         _grip = BoxGrip.None;
         Overlay.ReleasePointerCaptures();
         Redraw();
+    }
+
+    /// <summary>끌던 박스가 사라졌다 (끄는 사이에 새 영상이 열렸다) — 끌기를 그만둔다. 그대로 두면 없는 박스를 고치려 든다.</summary>
+    private void CancelDrag()
+    {
+        if (_grip == BoxGrip.None) return;
+        _grip = BoxGrip.None;
+        Overlay.ReleasePointerCaptures();
     }
 
     private void OnPointerExited(object sender, PointerRoutedEventArgs e)
@@ -219,7 +343,8 @@ public sealed partial class BoxEditor : UserControl
 
     private void OnKeyDown(object sender, KeyRoutedEventArgs e)
     {
-        if (e.Key is VirtualKey.Delete or VirtualKey.Back && _selected is not null && IsEditable && _viewModel is not null)
+        // 끄는 중에는 지우지 않는다 — 그리던 박스가 사라지면 다음 움직임이 없는 박스를 고치려 든다.
+        if (e.Key is VirtualKey.Delete or VirtualKey.Back && _selected is not null && _grip == BoxGrip.None && IsEditable && _viewModel is not null)
         {
             _viewModel.Boxes.Remove(_selected);
             _selected = null;
